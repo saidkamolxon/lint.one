@@ -31,6 +31,8 @@ opens files in the local site instead of lint.one, and is named
 | `grab.js` | the page a file comes from | Reads a link or the page itself, with that page's cookies, and streams it to the worker |
 | `bridge.js` | lint.one | Receives the file and hands it to the page (`takeHandoff` in `shared/app.js`); remembers lint.one's theme |
 | `audio/public/index.html` | the Audio tool | Takes the tab's sound from the stream id the bridge passes on (`listenTab`) |
+| `grant.*` | a small window | Asks for tab capture the first time someone listens, on a click Chrome accepts, then reopens the playing tab once |
+| `fullscreen.js` | a tab being listened to | Tells the worker when its video goes fullscreen, so the window can follow |
 | `auto.js` | every site, only when turned on | Sends a raw JSON/XML/YAML/CSV page to lint.one |
 | `popup.*` | the toolbar button | This page, paste, tools, the one setting |
 | `formats.js` | all of the above | Which tool reads what, the same table the landing page uses |
@@ -56,15 +58,18 @@ lint.one in Search Console.
 
 **Name:** lint.one
 
-**Summary** (132 characters max):
-Open JSON, XML, YAML, CSV, logs, PDFs, SQLite, Parquet and audio from any page in lint.one. Nothing you open leaves your browser.
+**Summary** (132 characters max; the manifest's `description`):
+Open JSON, YAML, CSV, XML, logs, HAR, .env, certificates, PDF, SQLite and Parquet from any page. Nothing leaves your browser.
 
 **Description:**
 
 > Right-click a selection, a link or a raw data page and open it in the
 > lint.one viewer that reads it: a JSON tree with errors pinned to the line,
-> XML with XPath, YAML validation, a sortable CSV table, a log reader for
-> millions of lines, PDFs, SQLite databases, Parquet files and audio with a live spectrum.
+> YAML validation, a sortable CSV table, XML with XPath, a log reader for
+> millions of lines, a HAR viewer that saves a copy without secrets, a .env
+> checker that says which lines break your app, an SSL certificate decoder,
+> PDFs, SQLite databases, Parquet files with SQL, and audio with a live
+> spectrum.
 >
 > - Right-click → Open in lint.one, on a selection, a link or a file page
 > - The toolbar button: open this page, paste anything, or pick a tool
@@ -79,8 +84,14 @@ Open JSON, XML, YAML, CSV, logs, PDFs, SQLite, Parquet and audio from any page i
 
 **Category:** Developer Tools
 
-**Screenshots:** 1280×800. The popup over a JSON page, the right-click menu
-on a link, the Audio tool listening to a tab, and a file opened in a tool.
+**Images:** [`store/`](store/) holds them, ready to upload:
+`screenshot-1..5.png` (1280×800), `promo-small.png` (440×280) and
+`promo-marquee.png` (1400×560). `store/shoot.mjs` draws them again from the
+tools' own samples and the real popup:
+
+```bash
+npm run build && npm run dev:extension && node extension/store/shoot.mjs
+```
 
 **Privacy policy URL:** https://lint.one/privacy/ (`site/public/privacy/`)
 
@@ -92,7 +103,11 @@ turn that into *"Read and change all your data on all websites"*, so
 neither is in the manifest as a requirement:
 
 - `tabCapture` is an optional permission, asked for the first time someone
-  listens to a tab.
+  listens to a tab. Chrome only asks after a click on the extension's own
+  page, and a menu item does not count, so a small window (`grant.html`)
+  asks, says beforehand how Chrome will word it, and then reopens the
+  playing tab once: Chrome only lets an extension hear a tab that was
+  clicked while the permission was already held.
 - There is no DevTools panel: `devtools_page` alone brings that line. The
   panel that was here (commit `d708c3d`, `extension/src/panel.*`) can come
   back as a separate extension for developers.

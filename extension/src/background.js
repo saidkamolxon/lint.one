@@ -22,7 +22,7 @@
    request carries the page's own cookies and a link behind a login works
    exactly as clicking it would. */
 
-importScripts('base.js', 'formats.js', 'grab.js');
+importScripts('base.js', 'formats.js', 'grab.js', 'fullscreen.js');
 
 var F = self.LintFormats;
 var BASE = self.LINT_BASE;
@@ -72,7 +72,8 @@ function fail(job, message) {
 
 function attach(tabId, job, port) {
   job.out = port;
-  if (job.capture) { sendCapture(tabId, job, port); return; }
+  /* a tab's sound: sent now if Chrome has answered, else when it does */
+  if (job.capture) { if (job.capture.result) send(job, job.capture.result); return; }
   send(job, { t: 'meta', name: job.name, type: job.type, encoding: job.encoding, size: job.size });
   var parts = job.parts;
   job.parts = [];
@@ -155,63 +156,128 @@ function openText(text, baseName, source, opts) {
    Listening to a tab: the Audio tool, fed by tabCapture
    ========================================================================== */
 
-/* Open the Audio tool beside the tab that is playing. The stream id is
-   asked for only once the tool's bridge connects: Chrome ties the id to
-   the tab that will use it *and* to that tab's origin, which it only has
-   once lint.one has loaded in it. The person clicking the button or the
-   menu item is what allows the capture; no site access is involved. */
+/* Open the Audio tool beside the tab that is playing, and ask Chrome for
+   the tab's sound as early as it can be asked. Two rules meet here:
+   - Chrome only lets an extension capture a tab it was just invoked on
+     (the click on the menu item or the button), and stops counting that
+     click once the person has moved on — so the Audio tab opens in the
+     background and the tab being captured stays in front until then;
+   - the stream id names the tab that will use it *and* that tab's origin,
+     so it can only be asked for once lint.one has committed in the new
+     tab, a moment after it opens, not when it is created.
+   The id waits in the job until the Audio page's bridge collects it. */
 function listen(tab) {
   if (!tab || tab.id < 0) return;
   var job = newJob('', '', 'text', 0);
-  job.capture = { tabId: tab.id, title: tab.title || hostOf(tab.url || '') };
-  return openTab('audio', tab, false).then(function (tabId) { register(tabId, job); });
+  job.capture = { tabId: tab.id, title: tab.title || hostOf(tab.url || ''), result: null };
+  opening++;
+  return chrome.tabs.create({
+    url: BASE + '/audio/', active: false,
+    windowId: tab.windowId, index: tab.index + 1, openerTabId: tab.id
+  }).then(function (created) {
+    register(created.id, job);
+    return whenCommitted(created.id).then(function () {
+      return chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id, consumerTabId: created.id });
+    }).then(function (streamId) {
+      job.capture.result = { t: 'capture', streamId: streamId, title: job.capture.title };
+      /* the same click lets a watcher into the tab, so its video can still
+         go properly fullscreen while it is being listened to */
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, func: self.lintoneFullscreen })
+        .catch(function () {});
+    }, function (err) {
+      job.capture.result = { t: 'error', message: captureError(err) };
+    }).then(function () {
+      if (job.out) send(job, job.capture.result);
+      chrome.tabs.update(created.id, { active: true }).catch(function () {});
+    });
+  }).finally(function () {
+    setTimeout(function () { opening--; releaseWaiting(); }, 0);
+  });
+}
+
+/* A listened-to tab's page went fullscreen or came back (fullscreen.js).
+   Chrome keeps that fullscreen inside the tab while it is captured, so the
+   window is made fullscreen here and afterwards put back as it was. The
+   state to go back to is kept in session storage, since the worker may be
+   stopped while a whole video plays. A window that is already fullscreen
+   (F11, or Chrome's own fullscreen once listening has stopped) is left
+   alone, both ways. */
+function onPageFullscreen(tab, on) {
+  var key = 'fs:' + tab.windowId;
+  chrome.windows.get(tab.windowId).then(function (w) {
+    return chrome.storage.session.get(key).then(function (saved) {
+      if (on) {
+        if (w.state === 'fullscreen') return;
+        return chrome.storage.session.set({ [key]: w.state }).then(function () {
+          return chrome.windows.update(w.id, { state: 'fullscreen' });
+        });
+      }
+      if (!saved[key]) return;
+      return chrome.storage.session.remove(key).then(function () {
+        return chrome.windows.update(w.id, { state: saved[key] });
+      });
+    });
+  }).catch(function () {});
+}
+
+/* Resolves once lint.one has committed in the tab: bridge.js runs at
+   document_start there and says so at once. (This extension may not read
+   a lint.one tab's address, so tabs.onUpdated cannot tell.) A tab that
+   reported before anyone asked is remembered briefly. */
+var committed = new Map();   // tabId -> time it reported
+var awaiting = new Map();    // tabId -> resolve
+
+function whenCommitted(tabId) {
+  if (committed.has(tabId)) return Promise.resolve();
+  return new Promise(function (resolve, reject) {
+    awaiting.set(tabId, resolve);
+    setTimeout(function () {
+      if (awaiting.get(tabId) !== resolve) return;
+      awaiting.delete(tabId);
+      reject(new Error('lint.one did not open'));
+    }, 10000);
+  });
+}
+
+function onCommitted(tabId) {
+  var resolve = awaiting.get(tabId);
+  if (resolve) { awaiting.delete(tabId); resolve(); return; }
+  committed.set(tabId, Date.now());
+  setTimeout(function () { committed.delete(tabId); }, 10000);
+}
+
+function captureError(err) {
+  var m = String(err && err.message || '');
+  if (/active stream/i.test(m)) return 'That tab is already being listened to.';
+  if (/not been invoked/i.test(m)) {
+    return 'Open the page that is playing in a new tab, then right-click it and choose Listen to this tab. ' +
+      '(Chrome keeps ignoring a tab clicked before lint.one could listen.)';
+  }
+  return 'Chrome would not let lint.one listen to that tab' + (m ? ' (\u201c' + m + '\u201d)' : '') + '.';
 }
 
 /* tabCapture is optional, so installing does not say "all your data on
-   all websites"; Chrome asks the first time someone listens. The tab
-   waiting for that answer is kept in session storage, and the grant
-   itself (permissions.onAdded) starts the listening, so it happens
-   whether or not the popup that asked survived Chrome's prompt. */
+   all websites"; Chrome asks the first time someone listens. Listening
+   cannot simply follow the grant: Chrome only counts a click made on the
+   tab while the permission is already held — and Chrome keeps what the
+   first click on a tab allowed for as long as that tab stays on the same
+   site, reloads included. A tab clicked before the permission existed
+   therefore has to be opened afresh once (grant.html does it, with
+   tabs.duplicate); from then on one click is enough. Checked with real
+   input in a headed Chromium: a reload does not clear it, a new tab does. */
 var CAPTURE = { permissions: ['tabCapture'] };
 
-function listenOrAsk(tab, fromMenu) {
+function listenOrAsk(tab) {
   return chrome.permissions.contains(CAPTURE).then(function (ok) {
     if (ok) return listen(tab);
-    return chrome.storage.session.set({ listenTab: tab.id }).then(function () {
-      if (!fromMenu) return;
-      /* the popup asks for itself; from the menu, ask here, and if Chrome
-         will not take the request from a menu click, say where to start */
-      return chrome.permissions.request(CAPTURE).catch(function () {
-        chrome.storage.session.remove('listenTab');
-        chrome.scripting.executeScript({
-          target: { tabId: tab.id }, func: self.lintoneGrab,
-          args: ['', { note: 'The first time, start listening from the lint.one button in the toolbar: Chrome asks there.' }]
-        }).catch(function () {});
-      });
+    /* Chrome will not ask from a menu click, so a small window asks, on a
+       button it does accept; the popup sends people here too */
+    return chrome.windows.create({
+      url: 'grant.html?tab=' + tab.id, type: 'popup', width: 440, height: 370, focused: true
     });
   });
 }
 
-chrome.permissions.onAdded.addListener(function (p) {
-  if (!p.permissions || p.permissions.indexOf('tabCapture') < 0) return;
-  chrome.storage.session.get('listenTab').then(function (v) {
-    if (v.listenTab == null) return;
-    chrome.storage.session.remove('listenTab');
-    chrome.tabs.get(v.listenTab).then(listen, function () {});
-  });
-});
-
-function sendCapture(consumerId, job, port) {
-  chrome.tabCapture.getMediaStreamId({ targetTabId: job.capture.tabId, consumerTabId: consumerId })
-    .then(function (streamId) {
-      send(job, { t: 'capture', streamId: streamId, title: job.capture.title });
-    }, function (err) {
-      var m = String(err && err.message || '');
-      send(job, { t: 'error', message: /active stream/i.test(m)
-        ? 'That tab is already being listened to.'
-        : 'Chrome would not let lint.one listen to that tab. Try again from the tab itself.' });
-    });
-}
 
 /* the menu item only while the tab in front is playing sound */
 function syncListenMenu(tab) {
@@ -224,6 +290,13 @@ chrome.tabs.onActivated.addListener(function (info) {
 });
 chrome.tabs.onUpdated.addListener(function (tabId, change, tab) {
   if ('audible' in change && tab.active) syncListenMenu(tab);
+});
+/* switching windows activates no tab, so the tab in front of the window
+   that now has focus is looked at here (after the permission window
+   closes, for one) */
+chrome.windows.onFocusChanged.addListener(function (windowId) {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId: windowId }).then(function (t) { syncListenMenu(t[0]); }, function () {});
 });
 
 /* ==========================================================================
@@ -466,7 +539,7 @@ chrome.contextMenus.onClicked.addListener(function (info, tab) {
   } else if (info.menuItemId === 'media' && info.srcUrl) {
     grabIn(tab, frameId, info.srcUrl, {});
   } else if (info.menuItemId === 'listen') {
-    listenOrAsk(tab, true);
+    listenOrAsk(tab);
   } else if (info.menuItemId === 'page') {
     grabIn(tab, frameId, info.frameUrl || info.pageUrl || tab.url, { usePage: true });
   }
@@ -536,9 +609,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, reply) {
       grabIn(tab, 0, tab.url, { usePage: true });
     }).catch(function () {});
   } else if (msg.kind === 'listen' && msg.tabId >= 0) {
-    chrome.tabs.get(msg.tabId).then(function (t) { return listenOrAsk(t, false); }, function () {});
+    chrome.tabs.get(msg.tabId).then(function (t) { return listenOrAsk(t); }, function () {});
   } else if (msg.kind === 'auto' && sender.tab && sender.frameId === 0) {
     grabIn(sender.tab, 0, sender.url || sender.tab.url, { usePage: true, replace: true });
+  } else if (msg.kind === 'fullscreen' && sender.tab) {
+    onPageFullscreen(sender.tab, !!msg.on);
+  } else if (msg.kind === 'committed' && sender.tab) {
+    onCommitted(sender.tab.id);
   } else if (msg.kind === 'sync-auto') {
     syncAuto();
   }

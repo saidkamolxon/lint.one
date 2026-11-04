@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "lint.one",
   "short_name": "lint",
-  "version": "0.2.0",
-  "description": "Open JSON, XML, YAML, CSV, logs, PDFs, SQLite and audio from any page in lint.one. Nothing you open leaves your browser.",
+  "version": "0.3.0",
+  "description": "Open JSON, YAML, CSV, XML, logs, HAR, .env, certificates, PDF, SQLite and Parquet from any page. Nothing leaves your browser.",
   "homepage_url": "https://lint.one/",
   "minimum_chrome_version": "116",
   "icons": {

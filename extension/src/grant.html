@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Listen to tabs · lint.one</title>
+<meta name="color-scheme" content="light dark">
+<link rel="preload" href="/shared/fonts/plex-sans-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/shared/theme.css">
+<link rel="stylesheet" href="/shared/app.css">
+<link rel="stylesheet" href="ui.css">
+<link rel="stylesheet" href="grant.css">
+<script src="ui-theme.js"></script>
+</head>
+<body class="grant">
+<!-- Opened by "Listen to this tab" in the right-click menu the first time:
+     Chrome only asks for tab capture after a click on the extension's own
+     page, and a menu item does not count. -->
+<main>
+  <span class="tool-tile tile-lg dot-audio" aria-hidden="true"></span>
+  <h1>Listen to this tab?</h1>
+  <p id="msg">Chrome asks once before lint.one can hear a tab. Its sound goes to the lint.one Audio tab to draw the spectrum; nothing is recorded or sent anywhere.</p>
+  <p class="note" id="note">Chrome words this permission as “Read and change all your data on all websites”, the same for every extension that can hear a tab. lint.one only hears the tab you choose, when you choose it. The sound is analysed on your device and never goes online.</p>
+  <div class="actions">
+    <button type="button" id="cancel" class="bordered">Cancel</button>
+    <button type="button" id="allow" class="primary">Allow and listen</button>
+  </div>
+</main>
+<script src="grant.js"></script>
+</body>
+</html>

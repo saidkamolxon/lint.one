@@ -34,6 +34,12 @@
   var TOOLS = ['json', 'xml', 'yaml', 'csv', 'pdf', 'log', 'audio', 'sqlite', 'parquet', 'env', 'har', 'cert'];
   if (TOOLS.indexOf(tool) < 0) return;
 
+  /* The Audio tool may be about to be sent a tab's sound, which Chrome
+     only allows once lint.one has committed here — now, at document_start.
+     Say so at once; waiting for the page to finish loading could let the
+     click that allows it go stale. */
+  if (tool === 'audio') chrome.runtime.sendMessage({ kind: 'committed' }).catch(function () {});
+
   var started = false;
 
   function decode(b64) {

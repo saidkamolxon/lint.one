@@ -48,17 +48,9 @@
       $('listenMeta').textContent = 'Live spectrum' + (where ? ' · ' + where : '');
       tint($('listen'), 'audio');
       $('listenBtn').onclick = function () {
-        /* the first time, Chrome asks for tab capture here; the worker
-           starts listening once it is granted (listenOrAsk) */
-        chrome.permissions.contains({ permissions: ['tabCapture'] }).then(function (ok) {
-          if (ok) { tell({ kind: 'listen', tabId: tab.id }); return; }
-          chrome.runtime.sendMessage({ kind: 'listen', tabId: tab.id }).catch(function () {}).then(function () {
-            return chrome.permissions.request({ permissions: ['tabCapture'] });
-          }).then(function (granted) {
-            if (granted) window.close();
-            else chrome.storage.session.remove('listenTab');
-          }, function () {});
-        });
+        /* without tab capture yet, the worker opens the window that asks
+           for it and gets the tab ready (listenOrAsk, grant.html) */
+        tell({ kind: 'listen', tabId: tab.id });
       };
       $('listen').hidden = false;
     }
