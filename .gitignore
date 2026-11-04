@@ -12,3 +12,6 @@ extension/*.zip
 
 # graphify knowledge graph output
 graphify-out/
+
+# intermediate shots from extension/store/shoot.mjs
+extension/store/raw-*.png

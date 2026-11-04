@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "lint.one",
   "short_name": "lint",
-  "version": "0.2.0",
-  "description": "Open JSON, XML, YAML, CSV, logs, PDFs, SQLite and audio from any page in lint.one. Nothing you open leaves your browser.",
+  "version": "0.4.0",
+  "description": "Open JSON, YAML, CSV, XML, logs, HAR, .env, certificates, PDF, SQLite and Parquet from any page. Nothing leaves your browser.",
   "homepage_url": "https://lint.one/",
   "minimum_chrome_version": "116",
   "icons": {
@@ -20,22 +20,54 @@
       "32": "icons/icon-32.png"
     }
   },
-  "background": { "service_worker": "background.js" },
-  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
-  "optional_permissions": ["tabCapture"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "declarativeContent",
+    "scripting",
+    "storage"
+  ],
+  "optional_permissions": [
+    "tabCapture",
+    "clipboardRead"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://lint.one/*"],
-      "js": ["bridge.js"],
+      "matches": [
+        "https://lint.one/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
-  "omnibox": { "keyword": "lint" },
+  "omnibox": {
+    "keyword": "lint"
+  },
   "commands": {
     "_execute_action": {
-      "suggested_key": { "default": "Alt+Shift+L" },
+      "suggested_key": {
+        "default": "Alt+Shift+L"
+      },
       "description": "Open the lint.one menu"
+    },
+    "open-here": {
+      "suggested_key": {
+        "default": "Alt+Shift+O"
+      },
+      "description": "Open the selection, or this page, in lint.one"
     }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   }
 }
