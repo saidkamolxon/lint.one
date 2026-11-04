@@ -12,7 +12,7 @@
      page itself when it is a file (a .json or .csv opened in a tab)
    - the popup: the current page, pasted text, or an empty tool
    - the omnibox: "lint" then a space, then text
-   - auto.js, when "Open data pages automatically" is on
+   - page.js, on a raw data page, when Settings asks for it
 
    And one thing that is not a file: a tab's sound. "Listen to this tab"
    opens the Audio tool on it through tabCapture, without the share-a-tab
@@ -22,7 +22,9 @@
    request carries the page's own cookies and a link behind a login works
    exactly as clicking it would. */
 
-importScripts('base.js', 'formats.js', 'grab.js', 'fullscreen.js');
+importScripts('base.js', 'formats.js', 'settings.js', 'grab.js', 'fullscreen.js');
+
+var S = self.LintSettings;
 
 var F = self.LintFormats;
 var BASE = self.LINT_BASE;
@@ -48,7 +50,8 @@ var opening = 0;
 
 function newJob(name, type, encoding, size) {
   return { name: name, type: type, encoding: encoding, size: size || 0,
-           parts: [], done: false, error: null, out: null };
+           parts: [], done: false, error: null, out: null,
+           tool: null, from: '', keep: [], kept: 0 };
 }
 
 function send(job, msg) {
@@ -56,6 +59,7 @@ function send(job, msg) {
 }
 
 function push(job, data) {
+  keep(job, data);
   if (job.out) send(job, { t: 'part', data: data });
   else job.parts.push(data);
 }
@@ -63,6 +67,7 @@ function push(job, data) {
 function finish(job) {
   job.done = true;
   if (job.out) send(job, { t: 'end' });
+  remember(job);
 }
 
 function fail(job, message) {
@@ -147,8 +152,11 @@ function openText(text, baseName, source, opts) {
   opts = opts || {};
   var tool = (opts.tool && F.BY_ID[opts.tool]) ? opts.tool : F.sniffText(text);
   var job = newJob(F.nameFor(baseName, tool, text), 'text/plain', 'text', text.length);
-  splitText(text).forEach(function (p) { job.parts.push(p); });
+  job.tool = tool;
+  job.from = opts.from || '';
+  splitText(text).forEach(function (p) { job.parts.push(p); keep(job, p); });
   job.done = true;
+  remember(job);
   return openTab(tool, source, opts.replace).then(function (tabId) { register(tabId, job); });
 }
 
@@ -358,6 +366,8 @@ function onGrab(port) {
       var d = decide(msg);
       if (d.error) { port.postMessage({ t: 'stop', message: d.error }); return; }
       job = newJob(d.name, msg.type || '', msg.encoding === 'text' ? 'text' : 'b64', msg.size);
+      job.tool = d.tool;
+      job.from = hostOf(port.sender && port.sender.tab && port.sender.tab.url || '');
       port.postMessage({ t: 'go' });
       var sourceTab = port.sender && port.sender.tab
         ? Promise.resolve(port.sender.tab)
@@ -432,6 +442,8 @@ function readHere(url, source, opts) {
           var d = decide({ name: name, type: type, size: blob.size, head: head });
           if (d.error) return;
           var job = newJob(d.name, type, 'b64', blob.size);
+          job.tool = d.tool;
+          job.from = hostOf(url);
           return openTab(d.tool, source, opts.replace).then(function (tabId) {
             register(tabId, job);
             var CH = 3 * 1024 * 1024, off = 0;
@@ -532,7 +544,7 @@ chrome.contextMenus.onClicked.addListener(function (info, tab) {
   var frameId = info.frameId || 0;
   if (info.menuItemId === 'selection') {
     selectionIn(tab, frameId, info.selectionText).then(function (text) {
-      if (text.trim()) openText(text, 'selection', tab);
+      if (text.trim()) openText(text, 'selection', tab, { from: hostOf(tab.url || '') });
     });
   } else if (info.menuItemId === 'link' && info.linkUrl) {
     grabIn(tab, frameId, info.linkUrl, {});
@@ -588,7 +600,7 @@ chrome.omnibox.onInputEntered.addListener(function (text, disposition) {
 });
 
 /* ==========================================================================
-   Messages from the popup and auto.js
+   Messages from the popup, the extension pages and page.js
    ========================================================================== */
 
 chrome.runtime.onMessage.addListener(function (msg, sender, reply) {
@@ -612,37 +624,50 @@ chrome.runtime.onMessage.addListener(function (msg, sender, reply) {
     chrome.tabs.get(msg.tabId).then(function (t) { return listenOrAsk(t); }, function () {});
   } else if (msg.kind === 'auto' && sender.tab && sender.frameId === 0) {
     grabIn(sender.tab, 0, sender.url || sender.tab.url, { usePage: true, replace: true });
+  } else if (msg.kind === 'page-open' && sender.tab && sender.frameId === 0) {
+    /* from a page formatted in place: the tool opens beside it */
+    grabIn(sender.tab, 0, sender.url || sender.tab.url, { usePage: true });
   } else if (msg.kind === 'fullscreen' && sender.tab) {
     onPageFullscreen(sender.tab, !!msg.on);
   } else if (msg.kind === 'committed' && sender.tab) {
     onCommitted(sender.tab.id);
   } else if (msg.kind === 'sync-auto') {
     syncAuto();
+  } else if (msg.kind === 'reopen' && typeof msg.id === 'string') {
+    chrome.tabs.query({ active: true, currentWindow: true }).then(function (tabs) { reopen(msg.id, tabs[0]); });
+  } else if (msg.kind === 'clear-recents') {
+    clearRecents();
   }
 });
 
 /* ==========================================================================
-   "Open data pages automatically": auto.js on every site, registered only
+   Raw data pages: page.js on every site, registered only
    while the setting is on and every site is allowed
    ========================================================================== */
 
+/* The content script for data pages: what it is made of. A script
+   registered by an earlier version (auto.js alone) is replaced. */
+var PAGE_JS = ['settings.js', 'viewer.js', 'page.js'];
+
 function syncAuto() {
   return Promise.all([
-    chrome.storage.local.get('auto'),
+    S.get(),
     chrome.permissions.contains({ origins: ALL_SITES }).catch(function () { return false; }),
     chrome.scripting.getRegisteredContentScripts({ ids: ['auto'] }).catch(function () { return []; })
   ]).then(function (r) {
-    var want = !!(r[0] && r[0].auto) && r[1];
-    var have = r[2].length > 0;
-    if (want && !have) {
+    var want = r[0].pageMode !== 'off' && r[1];
+    var have = r[2][0];
+    var current = have && JSON.stringify(have.js) === JSON.stringify(PAGE_JS);
+    var drop = have && (!want || !current)
+      ? chrome.scripting.unregisterContentScripts({ ids: ['auto'] }).catch(function () {})
+      : Promise.resolve();
+    return drop.then(function () {
+      if (!want || current) return;
       return chrome.scripting.registerContentScripts([{
-        id: 'auto', matches: ALL_SITES, js: ['auto.js'],
+        id: 'auto', matches: ALL_SITES, js: PAGE_JS,
         runAt: 'document_end', allFrames: false, persistAcrossSessions: true
       }]).catch(function () {});
-    }
-    if (!want && have) {
-      return chrome.scripting.unregisterContentScripts({ ids: ['auto'] }).catch(function () {});
-    }
+    });
   });
 }
 
@@ -651,13 +676,186 @@ chrome.permissions.onRemoved.addListener(function () {
   /* access taken back in Chrome's settings turns the setting off too, so
      the popup never shows a switch that does nothing */
   chrome.permissions.contains({ origins: ALL_SITES }).then(function (ok) {
-    if (!ok) chrome.storage.local.set({ auto: false });
+    if (!ok) S.set({ pageMode: 'off' });
     syncAuto();
   });
 });
 chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area === 'local' && changes.auto) syncAuto();
+  if (area !== 'local') return;
+  if (changes.pageMode) syncAuto();
+  if (changes.markIcon) syncIconRules();
+  if (changes.recents && changes.recents.newValue === false) clearRecents();
 });
 
-chrome.runtime.onInstalled.addListener(function () { buildMenus(); syncAuto(); });
+chrome.runtime.onInstalled.addListener(function (details) {
+  S.migrate().then(function () {
+    buildMenus();
+    syncAuto();
+    syncIconRules();
+  });
+  /* the first time only: what the extension can do, and the one choice
+     worth making up front */
+  if (details.reason === 'install') chrome.tabs.create({ url: 'welcome.html' });
+});
 chrome.runtime.onStartup.addListener(syncAuto);
+
+/* ==========================================================================
+   Recently opened: until Chrome closes, never on disk
+   ========================================================================== */
+
+/* What was opened is kept in chrome.storage.session, which lives in memory
+   and is gone when Chrome closes, so the popup can open it again in one
+   click. A file over KEEP_MAX is listed by name only (it cannot be
+   reopened from here); the setting turns it all off. */
+var KEEP_MAX = 2 * 1024 * 1024;
+var KEEP_TOTAL = 8 * 1024 * 1024;
+var RECENT_COUNT = 8;
+
+function keep(job, data) {
+  if (job.kept < 0) return;
+  job.kept += data.length;
+  if (job.kept > KEEP_MAX) { job.keep = []; job.kept = -1; return; }
+  job.keep.push(data);
+}
+
+function remember(job) {
+  if (!job.tool || job.remembered) return;
+  job.remembered = true;
+  var parts = job.kept < 0 ? null : job.keep;
+  job.keep = [];
+  S.get().then(function (s) {
+    if (!s.recents) return;
+    return chrome.storage.session.get('recents').then(function (v) {
+      var list = (v.recents || []).filter(function (r) { return r.name !== job.name || r.tool !== job.tool; });
+      var id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      list.unshift({ id: id, name: job.name, tool: job.tool, size: job.size, from: job.from || '',
+                     at: Date.now(), type: job.type, encoding: job.encoding, stored: !!parts,
+                     bytes: parts ? job.kept : 0 });
+      /* the oldest go first: past the count, or past the total kept */
+      var total = 0, drop = [];
+      list = list.filter(function (r, i) {
+        total += r.bytes || 0;
+        var stays = i < RECENT_COUNT && total <= KEEP_TOTAL;
+        if (!stays) drop.push('recent:' + r.id);
+        return stays;
+      });
+      var set = { recents: list };
+      if (parts) set['recent:' + id] = parts;
+      return chrome.storage.session.remove(drop).then(function () { return chrome.storage.session.set(set); });
+    });
+  }).catch(function () {});
+}
+
+function reopen(id, source) {
+  return chrome.storage.session.get(['recents', 'recent:' + id]).then(function (v) {
+    var r = (v.recents || []).filter(function (x) { return x.id === id; })[0];
+    var parts = v['recent:' + id];
+    if (!r) return;
+    if (!parts) { openEmpty(r.tool, source); return; }
+    var job = newJob(r.name, r.type, r.encoding, r.size);
+    job.tool = r.tool;
+    job.remembered = true;
+    job.parts = parts.slice();
+    job.done = true;
+    return openTab(r.tool, source, false).then(function (tabId) { register(tabId, job); });
+  }).catch(function () {});
+}
+
+function clearRecents() {
+  return chrome.storage.session.get('recents').then(function (v) {
+    var keys = (v.recents || []).map(function (r) { return 'recent:' + r.id; });
+    return chrome.storage.session.remove(keys.concat('recents'));
+  }).catch(function () {});
+}
+
+/* ==========================================================================
+   The toolbar icon, marked on a page lint.one can open
+   ========================================================================== */
+
+/* declarativeContent changes the icon by the page's address with no access
+   to the page at all (and no line in the install dialog): on /users.json
+   the mark carries a JSON-coloured dot, so the icon itself says "this one
+   opens". Rules outlive the worker; they are rebuilt on install, update
+   and when the setting changes. */
+function iconImages(hue) {
+  return fetch(chrome.runtime.getURL('icons/icon-32.png')).then(function (r) { return r.blob(); })
+    .then(function (b) { return createImageBitmap(b); })
+    .then(function (bmp) {
+      var out = {};
+      [16, 32].forEach(function (size) {
+        var c = new OffscreenCanvas(size, size), g = c.getContext('2d');
+        g.drawImage(bmp, 0, 0, size, size);
+        var k = size / 32, cx = 25 * k, cy = 25 * k;
+        /* a gap around the dot, so it reads on the dark mark and on any
+           toolbar */
+        g.globalCompositeOperation = 'destination-out';
+        g.beginPath(); g.arc(cx, cy, 8.5 * k, 0, Math.PI * 2); g.fill();
+        g.globalCompositeOperation = 'source-over';
+        g.fillStyle = hue;
+        g.beginPath(); g.arc(cx, cy, 6.5 * k, 0, Math.PI * 2); g.fill();
+        out[size] = g.getImageData(0, 0, size, size);
+      });
+      return out;
+    });
+}
+
+function syncIconRules() {
+  var dc = chrome.declarativeContent;
+  if (!dc) return Promise.resolve();
+  return S.get().then(function (s) {
+    return new Promise(function (resolve) { dc.onPageChanged.removeRules(undefined, resolve); }).then(function () {
+      if (!s.markIcon) return;
+      return Promise.all(F.TOOLS.map(function (t) {
+        var exts = Object.keys(F.BY_EXT).filter(function (e) { return F.BY_EXT[e] === t.id; });
+        if (!exts.length) return null;
+        return iconImages(t.hue).then(function (images) {
+          return {
+            id: 'mark-' + t.id,
+            conditions: exts.map(function (e) {
+              return new dc.PageStateMatcher({ pageUrl: { schemes: ['http', 'https'], pathSuffix: '.' + e } });
+            }),
+            actions: [new dc.SetIcon({ imageData: images })]
+          };
+        });
+      })).then(function (rules) {
+        rules = rules.filter(Boolean);
+        return new Promise(function (resolve) { dc.onPageChanged.addRules(rules, function () { resolve(); }); });
+      });
+    });
+  }).catch(function () {});
+}
+
+/* ==========================================================================
+   The keyboard shortcut: open the selection, or this page
+   ========================================================================== */
+
+/* Alt+Shift+O (changeable in chrome://extensions/shortcuts). The key press
+   is what lets the extension look at this one tab, as a click on the
+   button would. A selection opens as text; a page that is a file opens
+   as that file; any other page opens the popup instead. */
+chrome.commands.onCommand.addListener(function (command, tab) {
+  if (command !== 'open-here' || !tab) return;
+  chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: function () {
+      var el = document.activeElement, sel = '';
+      if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') && el.selectionEnd > el.selectionStart) {
+        sel = el.value.slice(el.selectionStart, el.selectionEnd);
+      } else sel = String(window.getSelection() || '');
+      return { sel: sel, type: document.contentType || '' };
+    }
+  }).then(function (r) {
+    var info = (r && r[0] && r[0].result) || {};
+    if (info.sel && info.sel.trim()) { openText(info.sel, 'selection', tab, { from: hostOf(tab.url || '') }); return; }
+    if (!F.isWebPage(info.type) || F.byName(tab.url || '')) { grabIn(tab, 0, tab.url, { usePage: true }); return; }
+    openPopup();
+  }, function () {
+    /* a page that takes no script: the built-in PDF viewer, a Chrome page */
+    if (F.byName((tab.url || '').split(/[?#]/)[0])) grabIn(tab, 0, tab.url, { usePage: true });
+    else openPopup();
+  });
+});
+
+function openPopup() {
+  if (chrome.action.openPopup) chrome.action.openPopup().catch(function () {});
+}

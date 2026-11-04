@@ -19,47 +19,55 @@
     <span class="logo-name">lint<span class="logo-tld">.one</span></span>
   </a>
   <span class="spacer"></span>
-  <span class="private" title="Everything opens in lint.one, in this browser. Nothing is uploaded.">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
-    Stays in this browser
-  </span>
+  <button type="button" class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.7 1.5h2.6l.4 1.9a5 5 0 0 1 1.2.7l1.8-.6 1.3 2.2-1.4 1.3a5 5 0 0 1 0 1.4l1.4 1.3-1.3 2.2-1.8-.6a5 5 0 0 1-1.2.7l-.4 1.9H6.7l-.4-1.9a5 5 0 0 1-1.2-.7l-1.8.6L2 9.7l1.4-1.3a5 5 0 0 1 0-1.4L2 5.7l1.3-2.2 1.8.6a5 5 0 0 1 1.2-.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+  </button>
 </header>
 
 <main>
-  <!-- the tab this popup was opened over, when it is a file a tool reads -->
-  <section class="page" id="page" hidden>
-    <button type="button" class="page-btn" id="pageBtn">
+  <!-- what is at hand: this page when it is a file, the tab's sound, what
+       was just copied. Each one is one click (or Enter) from its tool. -->
+  <div class="cards" id="cards">
+    <button type="button" class="card" id="page" hidden>
       <span class="tool-tile tile-lg" id="pageTile" aria-hidden="true"></span>
-      <span class="page-text">
-        <span class="page-name" id="pageName"></span>
-        <span class="page-meta" id="pageMeta"></span>
+      <span class="card-text">
+        <span class="card-kicker">This page</span>
+        <span class="card-name" id="pageName"></span>
+        <span class="card-meta" id="pageMeta"></span>
       </span>
-      <span class="page-go">Open</span>
+      <span class="card-go">Open</span>
     </button>
-  </section>
 
-  <!-- while the tab is playing sound: hear it in the Audio tool, with no
-       share-a-tab picker -->
-  <section class="page" id="listen" hidden>
-    <button type="button" class="page-btn" id="listenBtn">
-      <span class="tool-tile tile-lg dot-audio" aria-hidden="true"></span>
-      <span class="page-text">
-        <span class="page-name">Listen to this tab</span>
-        <span class="page-meta" id="listenMeta">Live spectrum</span>
+    <button type="button" class="card" id="clip" hidden>
+      <span class="tool-tile tile-lg" id="clipTile" aria-hidden="true"></span>
+      <span class="card-text">
+        <span class="card-kicker">Just copied</span>
+        <span class="card-name card-code" id="clipName"></span>
+        <span class="card-meta" id="clipMeta"></span>
       </span>
-      <span class="page-go">Listen</span>
+      <span class="card-go">Open</span>
     </button>
-  </section>
+
+    <button type="button" class="card" id="listen" hidden>
+      <span class="tool-tile tile-lg dot-audio" aria-hidden="true"></span>
+      <span class="card-text">
+        <span class="card-kicker">Playing</span>
+        <span class="card-name">Listen to this tab</span>
+        <span class="card-meta" id="listenMeta">Live spectrum</span>
+      </span>
+      <span class="card-go">Listen</span>
+    </button>
+  </div>
 
   <section class="paste">
-    <label class="label" for="paste">Paste</label>
-    <textarea id="paste" spellcheck="false" autocomplete="off" rows="5"
-      placeholder="JSON, YAML, CSV, XML, .env, a log or a certificate"></textarea>
+    <textarea id="paste" spellcheck="false" autocomplete="off" rows="3"
+      aria-label="Paste something to open"
+      placeholder="Paste JSON, YAML, CSV, XML, .env, a log…"></textarea>
     <div class="paste-bar">
       <div class="menu-wrap">
         <button type="button" class="as-btn bordered" id="asBtn" aria-haspopup="true" aria-expanded="false" disabled>
           <span class="tool-tile" id="asTile" aria-hidden="true"></span>
-          <span id="asName">Format</span>
+          <span id="asName">Detects the format</span>
           <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5 8 10l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <div class="menu as-menu" id="asMenu" role="menu"></div>
@@ -70,27 +78,45 @@
     </div>
   </section>
 
-  <section class="tools">
-    <div class="label">Tools</div>
-    <div class="grid" id="tools"></div>
+  <!-- shown once, until turned on or dismissed: the clipboard card above
+       is the quickest way in, and it is off until asked for -->
+  <section class="tip" id="tip" hidden>
+    <span class="tip-text"><b>Copy, then click.</b> Let lint.one offer what you just copied, so opening it is one click.</span>
+    <span class="tip-actions">
+      <button type="button" class="bordered" id="tipOn">Turn on</button>
+      <button type="button" class="icon-btn" id="tipOff" title="Not now" aria-label="Not now">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </span>
   </section>
 
-  <section class="setting">
-    <div class="setting-text">
-      <div class="setting-title" id="autoTitle">Open data pages automatically</div>
-      <div class="setting-note" id="autoNote">JSON, XML, YAML and CSV pages go straight to lint.one. Chrome asks for access to every site first.</div>
+  <section class="recent" id="recent" hidden>
+    <div class="section-head">
+      <span class="label">Recent</span>
+      <span class="spacer"></span>
+      <button type="button" class="link-btn" id="clearRecent" title="Forget these now (they go anyway when Chrome closes)">Clear</button>
     </div>
-    <button type="button" class="switch" id="autoSwitch" role="switch" aria-checked="false"
-      aria-labelledby="autoTitle" aria-describedby="autoNote"><span class="knob"></span></button>
+    <div class="rows" id="recentRows"></div>
+  </section>
+
+  <section class="tools">
+    <div class="section-head"><span class="label">Tools</span></div>
+    <div class="grid" id="tools"></div>
   </section>
 </main>
 
 <footer class="foot">
-  Also: the right-click menu, <kbd>lint</kbd> <kbd>Space</kbd> in the address bar, and in DevTools <em>Copy response</em>, then paste here.
+  <span class="private" title="Everything opens in lint.one, in this browser. Nothing is uploaded.">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+    Stays in this browser
+  </span>
+  <span class="spacer"></span>
+  <a href="#" class="shortcut" id="shortcut" title="Open the selection, or this page — change it in Chrome's shortcuts"></a>
 </footer>
 
 <script src="base.js"></script>
 <script src="formats.js"></script>
+<script src="settings.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

@@ -50,22 +50,25 @@ wherever the data already is:
   is a file (`/users.json`, `/report.csv`), and choose *Open in lint.one*.
   A link is read by the page it is on, with that page's cookies, so a file
   behind a login opens exactly as clicking it would.
-- **The toolbar button** opens the page you are on, anything you paste,
-  or any tool.
+- **The toolbar button** offers what is at hand: the page you are on,
+  what you just copied, the last few files you opened, and every tool.
+- **Alt+Shift+O** opens the selection, or the page you are on.
 - **The address bar:** type `lint`, a space, then paste.
+- **The icon marks a file:** on `/users.json` it carries JSON's colour.
 - **Listen to this tab**, from the toolbar button or the right-click menu
   while a tab plays sound, opens the Audio tool on it with no share-a-tab
   picker. Chrome still marks the tab as captured.
 - **From DevTools:** right-click a request → *Open in new tab*, then open
   that page from the toolbar button; or *Copy response* and paste it.
-- **Open data pages automatically** (off until you turn it on): JSON, XML,
-  YAML and CSV you open in a tab go straight to the tool.
+- **Raw data pages** (off until you choose): raw JSON in a tab, such as an
+  API response, is formatted in place as a tree, or the page goes
+  straight to the tool.
 
 The file travels page → extension → the tool's tab, all inside the
 browser, and reaches the page with `postMessage` — never in a URL and never
 through a server. Access to every site is requested when, and only if,
-you turn on the automatic opening, and tab capture the first time you
-listen to a tab, so Chrome's install dialog says only "Read and change
+you choose what raw data pages do, the clipboard when you ask to be
+offered it, and tab capture the first time you listen to a tab, so Chrome's install dialog says only "Read and change
 your data on lint.one". See [`extension/README.md`](extension/README.md) to
 load it and to publish it.
 

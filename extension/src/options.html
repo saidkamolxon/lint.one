@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · lint.one</title>
+<meta name="color-scheme" content="light dark">
+<link rel="preload" href="/shared/fonts/plex-sans-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/shared/theme.css">
+<link rel="stylesheet" href="/shared/app.css">
+<link rel="stylesheet" href="ui.css">
+<link rel="stylesheet" href="pages.css">
+<script src="ui-theme.js"></script>
+</head>
+<body class="xpage">
+<div class="wrap">
+  <header class="top">
+    <span class="logo-mark" aria-hidden="true"></span>
+    <span class="logo-name">lint<span class="logo-tld">.one</span></span>
+    <span class="crumb">/ Settings</span>
+  </header>
+
+  <section class="section" style="margin-top:0" id="data">
+    <h2>Raw data pages</h2>
+    <p class="section-intro">What happens when a tab shows a JSON, XML, YAML or CSV file as plain text, such as an API response.</p>
+    <div class="panel">
+      <div data-modes class="modes"></div>
+      <div data-formats class="formats"></div>
+      <div data-access class="access"></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Popup</h2>
+    <div class="panel" style="margin-top:var(--s3)">
+      <div class="opt">
+        <div class="opt-text">
+          <div class="opt-title" id="clipTitle">Offer what I just copied</div>
+          <div class="opt-note" id="clipNote">Opening the popup shows the JSON, YAML, CSV or log on your clipboard, ready to open with Enter. Chrome asks to let lint.one read the clipboard; it is read only while the popup is open.</div>
+        </div>
+        <div class="opt-side"><button type="button" class="switch" role="switch" id="clip" aria-labelledby="clipTitle" aria-describedby="clipNote"><span class="knob"></span></button></div>
+      </div>
+      <div class="opt">
+        <div class="opt-text">
+          <div class="opt-title" id="recTitle">Remember what I open, until Chrome closes</div>
+          <div class="opt-note" id="recNote">The last few files, in memory only, so the popup can open them again. Nothing is written to disk.</div>
+        </div>
+        <div class="opt-side">
+          <button type="button" class="bordered" id="clearRecent">Clear now</button>
+          <button type="button" class="switch" role="switch" id="rec" aria-labelledby="recTitle" aria-describedby="recNote"><span class="knob"></span></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Toolbar icon</h2>
+    <div class="panel" style="margin-top:var(--s3)">
+      <div class="opt">
+        <img src="icons/icon-32.png" width="32" height="32" alt="" id="markPreview" style="flex:none;image-rendering:auto">
+        <div class="opt-text">
+          <div class="opt-title" id="markTitle">Mark files lint.one can open</div>
+          <div class="opt-note" id="markNote">On a page like <code>/users.json</code> or <code>/report.csv</code>, the icon carries the format's colour. It goes by the address alone and needs no access to the page.</div>
+        </div>
+        <div class="opt-side"><button type="button" class="switch" role="switch" id="mark" aria-labelledby="markTitle" aria-describedby="markNote"><span class="knob"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Keyboard shortcuts</h2>
+    <div class="panel" style="margin-top:var(--s3)" id="shortcuts"></div>
+  </section>
+
+  <section class="section">
+    <h2>Appearance</h2>
+    <div class="panel" style="margin-top:var(--s3)">
+      <div class="opt">
+        <div class="opt-text">
+          <div class="opt-title">Theme</div>
+          <div class="opt-note">The popup and these pages wear the theme you pick on lint.one: <b id="themeName">System</b>.</div>
+        </div>
+        <div class="opt-side"><button type="button" class="bordered" id="themeBtn">Change on lint.one</button></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span id="version"></span>
+    <a href="#" id="welcome">How to use it</a>
+    <a href="#" data-href="/privacy/">Privacy</a>
+    <a href="https://github.com/saidkamolxon/lint.uz" target="_blank" rel="noopener">Source code</a>
+    <a href="https://github.com/saidkamolxon/lint.uz/issues/new" target="_blank" rel="noopener">Report a problem</a>
+    <span class="spacer"></span>
+    <span>Nothing you open leaves your browser.</span>
+  </footer>
+</div>
+<div class="saved" id="saved" role="status" aria-live="polite">Saved</div>
+
+<script src="base.js"></script>
+<script src="formats.js"></script>
+<script src="settings.js"></script>
+<script src="pagemode.js"></script>
+<script src="options.js"></script>
+</body>
+</html>
