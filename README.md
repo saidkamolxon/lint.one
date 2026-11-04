@@ -239,8 +239,8 @@ programs do and shows where they part:
 ## Local development
 
 ```bash
-git clone https://github.com/saidkamolxon/lint.uz.git
-cd lint.uz
+git clone https://github.com/saidkamolxon/lint.one.git
+cd lint.one
 
 npm run dev            # every tool at http://localhost:8787/<tool>/
 ```
