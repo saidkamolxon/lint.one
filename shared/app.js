@@ -2063,6 +2063,16 @@ function init(config) {
   });
 
   function readFile(file) {
+    /* a tool that can show a file too large for the editor another way
+       says from what size (init's largeFile: {bytes, open}); the editor is
+       emptied and the file goes to it whole, never read as text here */
+    var large = config.largeFile;
+    if (large && file.size > large.bytes) {
+      $('search').value = '';
+      editor.setValue('');
+      large.open(file);
+      return;
+    }
     if (file.size > 50 * 1048576) {
       showToast('That file is over 50 MB — too large to open here');
       return;

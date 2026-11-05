@@ -10,6 +10,12 @@
    Nothing is fetched from anywhere but lint.one. Parquet support is an
    extension in DuckDB's wasm build; the signed file is served from beside
    this one, and DuckDB is told to look for extensions there and nowhere else.
+
+   The CSV tool uses this worker too, for a file too large to edit
+   (open with format: 'csv'). A CSV has no footer to jump around in, so it
+   is read once into a table in DuckDB's memory, a fraction of the size the
+   page would need for it, and every page, sort and filter after that is a
+   query on the table.
    ========================================================================== */
 import { createDuckDB, BROWSER_RUNTIME, DuckDBDataProtocol, VoidLogger } from './vendor/duckdb-1.5.4/duckdb.mjs';
 import { light, whole, toCSV, toJSON, fmtTime, fmtDate, scaleDigits } from './values.js';
@@ -20,6 +26,7 @@ const ENGINE = 'DuckDB 1.5.4';
 let db = null;
 let conn = null;
 let rowNumbers = true;        // whether read_parquet could add file_row_number
+let isTable = false;          // a CSV, read into the table `data`
 let fields = [];              // the file's columns, with their Arrow types
 const held = new Map();       // 'grid' | 'query' -> {cols, rows}
 const counts = new Map();     // filter -> matching rows
@@ -101,8 +108,10 @@ async function start() {
   ].forEach((s) => conn.query(s));
 }
 
-async function open({ file }) {
+async function open({ file, format, header }) {
   await start();
+  if (format === 'csv') return openCSV(file, header);
+  isTable = false;
   db.registerFileHandle('data.parquet', file, DuckDBDataProtocol.BROWSER_FILEREADER, true);
   conn.query("CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('data.parquet')");
   try {
@@ -115,6 +124,63 @@ async function open({ file }) {
   held.clear();
   counts.clear();
   return { engine: ENGINE };
+}
+
+/* A CSV, read once into the table `data`. DuckDB finds the delimiter, the
+   header and each column's type from a sample; when a value further down
+   does not fit the type it guessed (a "n/a" deep in a column of numbers),
+   the file is read again with every column as text, which always works.
+   Short rows are padded with nulls rather than refused, as the CSV tool
+   marks them rather than refusing them. header: true, false, or omitted
+   for DuckDB to decide. */
+async function openCSV(file, header) {
+  isTable = true;
+  rowNumbers = false;
+  db.registerFileHandle('data.csv', file, DuckDBDataProtocol.BROWSER_FILEREADER, true);
+  const head = header === true ? ', header = true' : header === false ? ', header = false' : '';
+  const source = (extra) => `read_csv('data.csv', null_padding = true, sample_size = 102400${head}${extra})`;
+  const oom = (err) => /Out of Memory/i.test(String(err && err.message));
+  conn.query('DROP VIEW IF EXISTS data');
+  conn.query('DROP TABLE IF EXISTS data');
+  let typed = true, extra = '';
+  try {
+    conn.query('CREATE TABLE data AS SELECT * FROM ' + source(''));
+  } catch (err) {
+    if (!oom(err)) {
+      typed = false;
+      extra = ', all_varchar = true';
+      try {
+        conn.query('CREATE TABLE data AS SELECT * FROM ' + source(extra));
+      } catch (err2) {
+        if (!oom(err2)) throw err2;
+      }
+    }
+  }
+  /* Too large for DuckDB's memory as a table: read straight from the file
+     instead. Every page and sort is then a pass over the file, seconds
+     rather than milliseconds, but it opens. */
+  let inMemory = true;
+  try { conn.query('SELECT 1 FROM data LIMIT 0'); } catch (e) { inMemory = false; }
+  if (!inMemory) {
+    isTable = false;
+    conn.query('CREATE VIEW data AS SELECT * FROM ' + source(extra));
+  }
+  let delim = null, hasHeader = header;
+  try {
+    const s = conn.query(`SELECT Delimiter AS d, HasHeader AS h FROM sniff_csv('data.csv'${head}, sample_size = 102400)`);
+    delim = s.get(0).d;
+    if (hasHeader === undefined || hasHeader === null) hasHeader = !!s.get(0).h;
+  } catch (e) { /* only for the status line */ }
+  const table = conn.query('SELECT * FROM data LIMIT 0');
+  fields = table.schema.fields;
+  held.clear();
+  counts.clear();
+  return {
+    engine: ENGINE,
+    rows: Number(conn.query('SELECT count(*) AS n FROM data').get(0).n),
+    columns: columnsOf(table.schema),
+    delim, header: hasHeader, typed, inMemory
+  };
 }
 
 /* ==========================================================================
@@ -372,7 +438,10 @@ async function rows({ offset, limit, order, filter }) {
     table = run('SELECT * EXCLUDE (file_row_number) FROM lint_numbered WHERE file_row_number IN (' +
       'SELECT file_row_number FROM lint_numbered' + w + by + ` LIMIT ${n} OFFSET ${off})` + by, arg);
   } else {
-    table = run('SELECT * FROM data' + w + orderBy(order) + ` LIMIT ${n} OFFSET ${off}`, arg);
+    /* a table sorts the rows it holds; its rowid keeps equal values in the
+       same order from one page to the next */
+    const by = orderBy(order) + (order && isTable ? ', rowid' : '');
+    table = run('SELECT * FROM data' + w + by + ` LIMIT ${n} OFFSET ${off}`, arg);
   }
   const cols = columnsOf(table.schema);
   const out = rowsOf(table, n);

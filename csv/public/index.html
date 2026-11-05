@@ -84,6 +84,36 @@
 }
 .header-toggle:hover { color: var(--ink); }
 .header-toggle input { margin: 0; accent-color: var(--ink); }
+
+/* ---------- a file too large to edit (body.big-file) ----------
+   No editor: the table takes the page, a page of rows at a time from
+   DuckDB, with a pager in its bar */
+body.big-file #editorPane, body.big-file #divider, body.big-file #editorRail,
+body.big-file .tabs, body.big-file .empty-prompt, body.big-file #btnFormat,
+body.big-file #btnSearchMode, body.big-file #stepNav { display: none !important; }
+body.big-file #treePane { display: flex !important; }
+body.big-file #statusBar { display: flex !important; }
+body.big-file .tool-actions { visibility: visible !important; }
+.big-pager { display: inline-flex; align-items: center; gap: 2px; flex: none; margin-left: var(--s1); }
+.big-pager[hidden] { display: none; }
+.big-pager span {
+  font-size: var(--fs-small); color: var(--muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums; padding: 0 var(--s1);
+}
+.big-pager .icon-btn svg { width: 15px; height: 15px; }
+#tree.stale .csv-table { opacity: .55; transition: opacity .2s .15s; }
+.big-note {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s2);
+  height: 100%; padding: var(--s5); text-align: center; color: var(--muted); font-family: var(--ui);
+}
+.big-note h3 { margin: 0; color: var(--ink); font-size: var(--fs-large); font-weight: 600; }
+.big-note p { margin: 0; max-width: 460px; font-size: var(--fs-base); line-height: 1.55; }
+.big-note.err h3 { color: var(--bad); }
+.big-note .bar { width: 220px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: var(--s2); }
+.big-note .bar span { display: block; height: 100%; width: 30%; background: var(--hue); border-radius: 2px;
+  animation: big-slide 1.2s ease-in-out infinite; }
+@keyframes big-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .big-note .bar span { animation: none; width: 100%; } }
 </style>
 </head>
 <body>
@@ -107,6 +137,10 @@ window.LINT_CONFIG = {
   ],
   convert: [
     { id: 'btnToJson', label: 'JSON', key: 'mod+shift+j', title: 'Convert the rows to a JSON array and open it in the JSON viewer (also copied)' }
+  ],
+  /* only for a file too large to edit, which has no editor text to copy */
+  export: [
+    { id: 'btnBigCsv', label: 'Download these rows', title: 'Save the rows as the table shows them, filtered and sorted, as a CSV file (up to 100,000 rows)' }
   ],
   ext: 'csv'
 };
@@ -317,6 +351,7 @@ function renderTable() {
   var treeEl = document.getElementById('tree');
   var matchCount = document.getElementById('matchCount');
   treeEl.classList.add('table-mode');
+  if (big) { bigFilter(); return; }
 
   if (!currentModel) {
     treeEl.innerHTML = EMPTY;
@@ -407,6 +442,258 @@ function colName(i) {
   return s;
 }
 
+/* ==========================================================================
+   A file too large to edit
+
+   Parsing a CSV into the editor and the table costs the tab ten to twelve
+   times the file's size: 700 MB for a 60 MB file, and a crashed tab well
+   before a gigabyte. Past BIG_BYTES the file goes to DuckDB instead, the
+   Parquet tool's engine (parquet/sql.js), which reads it once into a
+   compact table of its own in a worker. The page then asks it for 200 rows
+   at a time; sorting and filtering are queries, a second or less on
+   millions of rows, and the tab itself stays at a few megabytes. The file
+   is not editable in this mode; it is read from disk and never uploaded.
+   ========================================================================== */
+var BIG_BYTES = 20 * 1048576;
+var BIG_PAGE = 200;
+var big = null;       // {file, worker, calls, info, offset, order, filter, total, seq}
+
+function bigRpc(type, data) {
+  var b = big;
+  return new Promise(function (resolve, reject) {
+    var id = ++b.nextId;
+    b.calls[id] = { resolve: resolve, reject: reject };
+    b.worker.postMessage(Object.assign({ id: id, type: type }, data));
+  });
+}
+
+function bigStatus(kind, msg) {
+  if (app) app.setStatus(kind, msg);
+}
+
+function bigNote(cls, title, text, busy) {
+  var treeEl = document.getElementById('tree');
+  treeEl.classList.remove('stale');
+  treeEl.innerHTML = '<div class="big-note ' + cls + '"><h3>' + esc(title) + '</h3>' +
+    (text ? '<p>' + esc(text) + '</p>' : '') + (busy ? '<div class="bar"><span></span></div>' : '') + '</div>';
+}
+
+function openBig(file) {
+  closeBig(true);
+  currentModel = null;
+  sortCol = null; sortDir = 1;
+  big = { file: file, worker: null, calls: {}, nextId: 0, info: null, offset: 0, order: null,
+          filter: document.getElementById('search').value.trim(), total: null, seq: 0, page: null };
+  document.body.classList.add('big-file');
+  LintApp.setDocument(file.name, function () { closeBig(); });
+  document.getElementById('bigPager').hidden = false;
+
+  var b = big;
+  b.worker = new Worker('/parquet/sql.js', { type: 'module' });
+  b.worker.onmessage = function (e) {
+    var m = e.data;
+    if (m.type === 'progress') {
+      if (big !== b || b.info) return;
+      /* the engine's own download, the first time; then back to the file */
+      if (m.done < m.total) {
+        bigNote('', 'Getting the table engine ready',
+          LintApp.fmtBytes(m.done) + ' of ' + LintApp.fmtBytes(m.total) + ', only the first time. Then ' +
+          LintApp.fmtBytes(file.size) + ' of CSV is read on your device.', true);
+      } else bigReadingNote();
+      return;
+    }
+    var call = b.calls[m.id];
+    if (!call) return;
+    delete b.calls[m.id];
+    if (m.ok) call.resolve(m); else call.reject(new Error(m.error));
+  };
+  b.worker.onerror = function (e) {
+    e.preventDefault();
+    Object.keys(b.calls).forEach(function (k) { b.calls[k].reject(new Error('The table engine could not start in this browser.')); });
+    b.calls = {};
+  };
+  bigLoadFile();
+}
+
+/* (re)read the file into DuckDB's table, with the header setting as it is */
+function bigLoadFile() {
+  var b = big;
+  b.info = null; b.total = null; b.offset = 0; b.order = null; sortCol = null;
+  bigReadingNote();
+  var t0 = performance.now();
+  bigRpc('open', { file: b.file, format: 'csv', header: hasHeader }).then(function (info) {
+    if (big !== b) return;
+    b.info = info;
+    b.total = info.rows;
+    b.secs = (performance.now() - t0) / 1000;
+    bigStatusLine();
+    bigPage();
+  }, function (err) {
+    if (big !== b) return;
+    bigStatus('err', err.message);
+    bigNote('err', 'This file could not be read', err.message, false);
+  });
+}
+
+function bigReadingNote() {
+  bigStatus('', 'Reading ' + big.file.name + ' (' + LintApp.fmtBytes(big.file.size) + ')…');
+  bigNote('', 'Reading ' + LintApp.fmtBytes(big.file.size) + ' of CSV',
+    'Too large to edit here, so DuckDB reads it into a table on your device. ' +
+    'This takes a few seconds once; sorting and filtering are quick after.', true);
+}
+
+function bigStatusLine() {
+  var i = big.info;
+  var name = { ',': 'comma', '\t': 'tab', ';': 'semicolon', '|': 'pipe' }[i.delim];
+  bigStatus('ok', [
+    LintApp.fmtNum(i.rows) + (i.rows === 1 ? ' row' : ' rows') + ', ' + i.columns.length + ' columns' +
+      (name ? ', ' + name + '-separated' : ''),
+    LintApp.fmtBytes(big.file.size) + ', too large to edit: read by ' + i.engine + ' in ' + big.secs.toFixed(1) + ' s' +
+      (i.typed ? '' : ', every column as text') +
+      (i.inMemory ? '' : ', read from the file each time (too large to hold)')
+  ]);
+}
+
+function bigFilter() {
+  if (!big) return;
+  big.filter = document.getElementById('search').value.trim();
+  big.offset = 0;
+  big.total = big.filter ? null : big.info && big.info.rows;
+  if (big.info) bigPage();
+}
+
+/* One page of rows. A newer request makes an older answer irrelevant; the
+   count of a filter comes after its first page, as in the Parquet tool. */
+function bigPage() {
+  var b = big;
+  if (!b || !b.info) return;
+  var seq = ++b.seq;
+  var want = { offset: b.offset, limit: BIG_PAGE, order: b.order, filter: b.filter };
+  document.getElementById('tree').classList.add('stale');
+  bigRpc('rows', want).then(function (d) {
+    if (big !== b || seq !== b.seq) return;
+    if (d.total !== null && d.total !== undefined) b.total = d.total;
+    b.page = d;
+    bigRender();
+    if (want.filter && (d.total === null || d.total === undefined)) {
+      return bigRpc('count', { filter: want.filter }).then(function (c) {
+        if (big !== b || seq !== b.seq) return;
+        b.total = c.n;
+        bigPager();
+      });
+    }
+  }).catch(function (err) {
+    if (big !== b || seq !== b.seq) return;
+    bigNote('err', 'That did not work', err.message, false);
+  });
+}
+
+function bigCell(v) {
+  if (v === null || v === undefined) return { text: '∅', cls: 'empty-cell', title: 'null' };
+  if (typeof v === 'object') {
+    if (typeof v.t === 'string') return { text: v.t + '…', cls: '', title: v.t + '… (' + LintApp.fmtNum(v.n) + ' characters)' };
+    if (v.b !== undefined) return { text: v.b + ' bytes', cls: 'empty-cell', title: '' };
+    return { text: JSON.stringify(v), cls: '', title: '' };
+  }
+  var s = String(v);
+  return { text: s === '' ? '∅' : s, cls: s === '' ? 'empty-cell' : '', title: s };
+}
+
+function bigRender() {
+  var d = big.page, treeEl = document.getElementById('tree');
+  var cols = big.info.columns;
+  var NUM = { int: 1, float: 1, decimal: 1 };
+  var html = '<table class="csv-table"><thead><tr><th class="rn"></th>';
+  cols.forEach(function (c, h) {
+    var arrow = big.order && big.order.col === c.name
+      ? '<span class="sort">' + (big.order.dir === 1 ? '▲' : '▼') + '</span>' : '';
+    html += '<th data-col="' + h + '" title="Sort by this column">' + esc(c.name) + arrow +
+      '<span class="coltype">' + esc(c.type) + '</span></th>';
+  });
+  html += '</tr></thead><tbody>';
+  d.rows.forEach(function (row, i) {
+    html += '<tr><td class="rn">' + LintApp.fmtNum(big.offset + i + 1) + '</td>';
+    row.forEach(function (v, c) {
+      var x = bigCell(v);
+      var cls = x.cls || (NUM[cols[c].kind] ? 'num' : '');
+      html += '<td' + (cls ? ' class="' + cls + '"' : '') + ' title="' + esc(x.title) + '">' + esc(x.text) + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  if (!d.rows.length) html = '<div class="empty">' + (big.filter ? 'No rows match “' + esc(big.filter) + '”.' : 'No rows.') + '</div>';
+  treeEl.classList.remove('stale');
+  treeEl.innerHTML = html;
+  treeEl.scrollTop = 0;
+  bigPager();
+}
+
+function bigPager() {
+  var pos = document.getElementById('bigPos');
+  var shown = big.page ? big.page.rows.length : 0;
+  var total = big.total;
+  pos.textContent = shown
+    ? LintApp.fmtNum(big.offset + 1) + '–' + LintApp.fmtNum(big.offset + shown) + ' of ' +
+      (total === null || total === undefined ? '…' : LintApp.fmtNum(total))
+    : '';
+  document.getElementById('matchCount').textContent = big.filter && total !== null && total !== undefined
+    ? LintApp.fmtNum(total) + (total === 1 ? ' row' : ' rows') : '';
+  document.getElementById('btnBigPrev').disabled = big.offset === 0;
+  document.getElementById('btnBigNext').disabled = shown < BIG_PAGE ||
+    (total !== null && total !== undefined && big.offset + shown >= total);
+}
+
+function bigTurn(dir) {
+  if (!big || !big.page) return;
+  var next = big.offset + dir * BIG_PAGE;
+  if (next < 0 || (dir > 0 && big.page.rows.length < BIG_PAGE)) return;
+  big.offset = next;
+  bigPage();
+}
+
+/* the rows as the table shows them, filtered and sorted, as JSON */
+function bigToJson() {
+  var b = big;
+  if (!b.info) return;
+  LintApp.toast('Converting…');
+  bigRpc('export', { view: 'grid', order: b.order, filter: b.filter, format: 'json' }).then(function (d) {
+    LintApp.copyAndOffer(d.text, 'JSON', 'csv', 'json');
+    if (d.clipped) LintApp.toast('The first ' + LintApp.fmtNum(d.rows) + ' rows, as JSON. For the rest, use a filter.');
+  }, function (err) { LintApp.toast(err.message); });
+}
+
+/* the rows as the table shows them, filtered and sorted, as a file */
+function bigDownload() {
+  var b = big;
+  if (!b || !b.info) return;
+  LintApp.toast('Preparing…');
+  bigRpc('export', { view: 'grid', order: b.order, filter: b.filter, format: 'csv' }).then(function (d) {
+    var name = b.file.name.replace(/\.[^.]+$/, '') + (b.filter || b.order ? '-rows' : '-first') + '.csv';
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([d.text], { type: 'text/csv' }));
+    a.download = name;
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+    LintApp.toast((d.clipped ? 'The first ' : '') + LintApp.fmtNum(d.rows) + ' rows saved as ' + name);
+  }, function (err) { LintApp.toast(err.message); });
+}
+
+/* quiet: another document is taking its place */
+function closeBig(quiet) {
+  if (!big) return;
+  if (big.worker) big.worker.terminate();
+  big = null;
+  document.body.classList.remove('big-file');
+  document.getElementById('bigPager').hidden = true;
+  document.getElementById('matchCount').textContent = '';
+  if (quiet) return;
+  LintApp.setDocument(null);
+  document.getElementById('search').value = '';
+  bigStatus('', '');
+  renderTable();
+  app.editor.input.focus();
+}
+
 var EMPTY = LintApp.emptyState({
   title: 'Paste CSV to see it as a table',
   body: 'Click a column heading to sort; the row filter searches every cell.',
@@ -449,7 +736,13 @@ var app = LintApp.init({
     decorate: function () {},
     actions: function () { return []; }
   },
+  largeFile: { bytes: BIG_BYTES, open: openBig },
   onParsed: function (model) {
+    /* a document in the editor (a smaller file, a paste, the sample) ends
+       the large file's table; the empty editor it leaves behind does not */
+    if (model && big) closeBig(true);
+    /* the emptied editor's run has just cleared the status bar */
+    if (big) { if (big.info) bigStatusLine(); else bigStatus('', 'Reading ' + big.file.name + ' (' + LintApp.fmtBytes(big.file.size) + ')…'); return; }
     currentModel = model;
     if (model && model.delim !== hlDelim) {
       /* repaint once with the real delimiter the sniffer found */
@@ -475,6 +768,16 @@ document.getElementById('tree').addEventListener('click', function (e) {
   var th = e.target.closest('th[data-col]');
   if (!th) return;
   var col = parseInt(th.dataset.col, 10);
+  if (big) {
+    if (!big.info) return;
+    var name = big.info.columns[col].name;
+    big.order = big.order && big.order.col === name
+      ? (big.order.dir === 1 ? { col: name, dir: -1 } : null)
+      : { col: name, dir: 1 };
+    big.offset = 0;
+    bigPage();
+    return;
+  }
   if (sortCol === col) sortDir = -sortDir;
   else { sortCol = col; sortDir = 1; }
   renderTable();
@@ -483,6 +786,7 @@ document.getElementById('tree').addEventListener('click', function (e) {
 /* Expand / collapse become "widen / narrow columns" here */
 document.getElementById('btnExpand').title = 'Clear sorting';
 document.getElementById('btnExpand').addEventListener('click', function () {
+  if (big) { if (big.order) { big.order = null; big.offset = 0; bigPage(); } return; }
   sortCol = null; sortDir = 1;
   renderTable();
 });
@@ -490,6 +794,7 @@ document.getElementById('btnCollapse').style.display = 'none';
 document.getElementById('btnWrap').style.display = 'none';
 
 document.getElementById('btnFormat').addEventListener('click', function () {
+  if (big) return;
   var res = parse(app.editor.getValue());
   if (!res.ok) { app.run(); LintApp.toast('Fix the CSV before tidying quotes'); return; }
   var d = res.value.delim;
@@ -505,6 +810,7 @@ document.getElementById('btnFormat').addEventListener('click', function () {
 });
 
 document.getElementById('btnToJson').addEventListener('click', function () {
+  if (big) { bigToJson(); return; }
   var res = parse(app.editor.getValue());
   if (!res.ok) { app.run(); LintApp.toast('Fix the CSV before converting'); return; }
   var rows = res.value.rows;
@@ -532,12 +838,30 @@ headerToggle.className = 'header-toggle';
 headerToggle.title = 'Treat the first row as column names';
 headerToggle.innerHTML = '<input type="checkbox" id="chkHeader">Header row';
 document.getElementById('matchCount').after(headerToggle);
+
+/* the large file's pager, beside them */
+headerToggle.insertAdjacentHTML('afterend',
+  '<span class="big-pager" id="bigPager" hidden>' +
+    '<button type="button" class="icon-btn" id="btnBigPrev" title="Previous 200 rows" aria-label="Previous rows">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>' +
+    '<span id="bigPos"></span>' +
+    '<button type="button" class="icon-btn" id="btnBigNext" title="Next 200 rows" aria-label="Next rows">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>' +
+  '</span>');
+document.getElementById('btnBigPrev').addEventListener('click', function () { bigTurn(-1); });
+document.getElementById('btnBigNext').addEventListener('click', function () { bigTurn(1); });
+/* the editor's Copy and Download have no text to copy for a large file */
+LintApp.when('btnCopy', function () { return !big; });
+LintApp.when('btnBigCsv', function () { return !!big; });
+document.getElementById('btnBigCsv').addEventListener('click', bigDownload);
+LintApp.when('btnDownload', function () { return !big; });
 var chkHeader = document.getElementById('chkHeader');
 chkHeader.checked = hasHeader;
 chkHeader.addEventListener('change', function () {
   hasHeader = chkHeader.checked;
   try { localStorage.setItem('lintuz-csv-header', hasHeader ? '1' : '0'); } catch (e) {}
   sortCol = null;
+  if (big) { bigLoadFile(); return; }
   app.editor.paint();
   app.run();
 });
