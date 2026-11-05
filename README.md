@@ -220,6 +220,11 @@ for the same reason. A database saved in WAL mode opens without whatever its
   header and each column's type, and the page asks it for 200 rows at a
   time. Sorting and filtering are queries; the tab itself stays at about
   10 MB.
+- **The first rows at once.** Only 200 rows show at a time, so the first
+  megabyte is read and parsed in the page while DuckDB reads the whole
+  file: the first 1,000 rows are on screen in half a second and their
+  pages turn, and DuckDB's own page takes their place when it is done.
+  Sorting waits for it; a filter typed meanwhile runs when it is ready.
 - **Measured** in Chromium: 60 MB (858,000 rows) opens in 2.5 s; 440 MB
   (6 million rows) in 8 s, sorts in a third of a second and filters in two.
 - **When it does not fit.** A value further down that does not fit the

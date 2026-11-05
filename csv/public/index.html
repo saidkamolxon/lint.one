@@ -115,6 +115,17 @@ body.big-file .tool-actions { visibility: visible !important; }
 @keyframes big-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) { .big-note .bar span { animation: none; width: 100%; } }
 
+/* while DuckDB reads the rest, a thin line runs under the table's bar */
+body.big-loading #treePane .treebar { position: relative; }
+body.big-loading #treePane .treebar::after {
+  content: ''; position: absolute; left: 0; bottom: -1px; height: 2px; width: 30%;
+  background: var(--hue); border-radius: 2px;
+  animation: big-line 1.4s ease-in-out infinite;
+}
+@keyframes big-line { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { body.big-loading #treePane .treebar::after { animation: none; width: 100%; opacity: .5; } }
+body.big-loading .csv-table thead th[data-col] { cursor: progress; }
+
 /* ---------- SQL on a large file (body.big-sql) ---------- */
 #btnBigSql { font-size: var(--fs-small); font-weight: 600; padding: 3px 10px; flex: none; }
 #btnBigSql[aria-pressed="true"] { background: var(--hue); border-color: var(--hue); color: var(--hue-ink); }
@@ -519,7 +530,7 @@ function openBig(file) {
   sortCol = null; sortDir = 1;
   big = { file: file, worker: null, calls: {}, nextId: 0, info: null, offset: 0, order: null,
           filter: document.getElementById('search').value.trim(), total: null, seq: 0, page: null,
-          cache: new Map(), gen: 0, mode: 'rows', q: null, running: false, reopenSql: null };
+          cache: new Map(), gen: 0, mode: 'rows', q: null, running: false, reopenSql: null, preview: null };
   document.body.classList.add('big-file');
   LintApp.setDocument(file.name, function () { closeBig(); });
   document.getElementById('bigPager').hidden = false;
@@ -530,7 +541,14 @@ function openBig(file) {
     var m = e.data;
     if (m.type === 'progress') {
       if (big !== b || b.info) return;
-      /* the engine's own download, the first time; then back to the file */
+      /* the engine's own download, the first time; then back to the file.
+         With the first rows already on screen, only the status bar says so */
+      if (b.preview) {
+        bigStatus('', m.done < m.total
+          ? 'Getting the table engine ready: ' + LintApp.fmtBytes(m.done) + ' of ' + LintApp.fmtBytes(m.total) + ', only the first time'
+          : bigReadingText());
+        return;
+      }
       if (m.done < m.total) {
         bigNote('', 'Getting the table engine ready',
           LintApp.fmtBytes(m.done) + ' of ' + LintApp.fmtBytes(m.total) + ', only the first time. Then ' +
@@ -577,12 +595,15 @@ function bigHeader(on) {
 function bigLoadFile() {
   var b = big;
   b.info = null; b.total = null; b.offset = 0; b.order = null; sortCol = null;
+  document.body.classList.add('big-loading');
   bigReadingNote();
+  bigPreview(b);
   var t0 = performance.now();
   bigRpc('open', { file: b.file, format: 'csv' }).then(function (info) {
     if (big !== b) return;
+    document.body.classList.remove('big-loading');
     b.info = info;
-    b.total = info.rows;
+    b.total = b.filter ? null : info.rows;
     /* DuckDB decides whether the first line is a header; the switch shows
        what it found, and changes it without reading the file again */
     var chk = document.getElementById('chkHeader');
@@ -600,13 +621,64 @@ function bigLoadFile() {
     }
   }, function (err) {
     if (big !== b) return;
+    document.body.classList.remove('big-loading');
     bigStatus('err', err.message);
     bigNote('err', 'This file could not be read', err.message, false);
   });
 }
 
+/* The first rows at once. Only 200 are shown at a time, so the start of
+   the file, read and parsed here in a few milliseconds, is on screen while
+   DuckDB reads the whole of it; its own first page then takes the place of
+   these, with the types and the header it found. Up to 1,000 rows are kept,
+   so the first pages turn before DuckDB is done. A start the parser cannot
+   read (a quoted field longer than the slice) just waits for DuckDB. */
+var PREVIEW_BYTES = 1048576;
+var PREVIEW_ROWS = 1000;
+
+function bigPreview(b) {
+  b.file.slice(0, PREVIEW_BYTES).text().then(function (text) {
+    if (big !== b || b.info) return;
+    if (b.file.size > PREVIEW_BYTES) {
+      var cut = text.lastIndexOf('\n');
+      if (cut <= 0) return;
+      text = text.slice(0, cut);
+    }
+    var res = parse(text);
+    if (!res.ok) return;
+    var rows = res.value.rows;
+    var from = hasHeader && rows.length > 1 ? 1 : 0;
+    var width = 0;
+    for (var r = 0; r < Math.min(rows.length, PREVIEW_ROWS + 1); r++) width = Math.max(width, rows[r].length);
+    var columns = [];
+    for (var c = 0; c < width; c++) {
+      var t = columnType(rows, c, from);
+      columns.push({
+        name: from && rows[0][c] !== undefined && rows[0][c] !== '' ? rows[0][c] : colName(c),
+        type: t === 'number' ? 'number' : 'text', kind: t === 'number' ? 'float' : 'text'
+      });
+    }
+    var body = rows.slice(from, from + PREVIEW_ROWS).map(function (row) {
+      var out = [];
+      for (var c = 0; c < width; c++) out.push(row[c] === undefined || row[c] === '' ? null : row[c]);
+      return out;
+    });
+    b.preview = { columns: columns, rows: body };
+    b.page = { rows: body.slice(b.offset, b.offset + BIG_PAGE) };
+    bigStatus('', bigReadingText());
+    if (b.mode !== 'sql') bigRender();
+  }, function () { /* DuckDB will show it */ });
+}
+
+function bigReadingText() {
+  return big.preview
+    ? 'The first ' + LintApp.fmtNum(big.preview.rows.length) + ' rows, while DuckDB reads all ' +
+      LintApp.fmtBytes(big.file.size) + '; sorting, filtering and SQL in a moment'
+    : 'Reading ' + big.file.name + ' (' + LintApp.fmtBytes(big.file.size) + ')…';
+}
+
 function bigReadingNote() {
-  bigStatus('', 'Reading ' + big.file.name + ' (' + LintApp.fmtBytes(big.file.size) + ')…');
+  bigStatus('', bigReadingText());
   bigNote('', 'Reading ' + LintApp.fmtBytes(big.file.size) + ' of CSV',
     'Too large to edit here, so DuckDB reads it into a table on your device. ' +
     'This takes a few seconds once; sorting and filtering are quick after.', true);
@@ -629,7 +701,10 @@ function bigFilter() {
   big.filter = document.getElementById('search').value.trim();
   big.offset = 0;
   big.total = big.filter ? null : big.info && big.info.rows;
-  if (big.info) bigPage();
+  if (big.info) { bigPage(); return; }
+  /* still reading: the filter waits for DuckDB, and says so */
+  document.getElementById('matchCount').textContent = big.filter ? 'in a moment…' : '';
+  if (big.preview && !big.filter) { big.page = { rows: big.preview.rows.slice(0, BIG_PAGE) }; bigRender(); }
 }
 
 /* One page of rows. A newer request makes an older answer irrelevant; the
@@ -707,7 +782,7 @@ function bigRender() {
   if (sql && !(big.q && big.q.columns)) { bigSqlShow(); return; }
   var d = sql ? { rows: big.q.rows } : big.page, treeEl = document.getElementById('tree');
   if (!d) return;
-  var cols = sql ? big.q.columns : big.info.columns;
+  var cols = sql ? big.q.columns : big.info ? big.info.columns : big.preview.columns;
   var base = sql ? big.q.offset : big.offset;
   var NUM = { int: 1, float: 1, decimal: 1 };
   var html = '<table class="csv-table"><thead><tr><th class="rn"></th>';
@@ -747,6 +822,12 @@ function bigPager() {
   }
   var shown = big.page ? big.page.rows.length : 0;
   var total = big.total;
+  if (!big.info && big.preview) {
+    pos.textContent = shown ? LintApp.fmtNum(big.offset + 1) + '–' + LintApp.fmtNum(big.offset + shown) + ' of …' : '';
+    document.getElementById('btnBigPrev').disabled = big.offset === 0;
+    document.getElementById('btnBigNext').disabled = big.offset + BIG_PAGE >= big.preview.rows.length;
+    return;
+  }
   pos.textContent = shown
     ? LintApp.fmtNum(big.offset + 1) + '–' + LintApp.fmtNum(big.offset + shown) + ' of ' +
       (total === null || total === undefined ? '…' : LintApp.fmtNum(total))
@@ -761,6 +842,16 @@ function bigPager() {
 function bigTurn(dir) {
   if (big && big.mode === 'sql') { bigSqlTurn(dir); return; }
   if (!big || !big.page) return;
+  if (!big.info) {
+    /* the first pages, from the rows read here, until DuckDB has the rest */
+    if (!big.preview || big.filter) return;
+    var at = big.offset + dir * BIG_PAGE;
+    if (at < 0 || at >= big.preview.rows.length) return;
+    big.offset = at;
+    big.page = { rows: big.preview.rows.slice(at, at + BIG_PAGE) };
+    bigRender();
+    return;
+  }
   var next = big.offset + dir * BIG_PAGE;
   if (next < 0 || (dir > 0 && big.page.rows.length < BIG_PAGE)) return;
   big.offset = next;
@@ -929,6 +1020,7 @@ function closeBig(quiet) {
   big = null;
   document.body.classList.remove('big-file');
   document.body.classList.remove('big-sql');
+  document.body.classList.remove('big-loading');
   document.getElementById('bigSql').hidden = true;
   document.getElementById('btnBigSql').hidden = true;
   document.getElementById('btnBigSql').setAttribute('aria-pressed', 'false');
@@ -994,7 +1086,7 @@ var app = LintApp.init({
        the large file's table; the empty editor it leaves behind does not */
     if (model && big) closeBig(true);
     /* the emptied editor's run has just cleared the status bar */
-    if (big) { if (big.info) bigStatusLine(); else bigStatus('', 'Reading ' + big.file.name + ' (' + LintApp.fmtBytes(big.file.size) + ')…'); return; }
+    if (big) { if (big.info) bigStatusLine(); else bigStatus('', bigReadingText()); return; }
     currentModel = model;
     if (model && model.delim !== hlDelim) {
       /* repaint once with the real delimiter the sniffer found */
@@ -1021,7 +1113,8 @@ document.getElementById('tree').addEventListener('click', function (e) {
   if (!th) return;
   var col = parseInt(th.dataset.col, 10);
   if (big) {
-    if (!big.info || big.mode === 'sql') return;
+    if (!big.info) { if (big.preview) LintApp.toast('Sorting is ready as soon as DuckDB has read the file'); return; }
+    if (big.mode === 'sql') return;
     var name = big.info.columns[col].name;
     big.order = big.order && big.order.col === name
       ? (big.order.dir === 1 ? { col: name, dir: -1 } : null)
