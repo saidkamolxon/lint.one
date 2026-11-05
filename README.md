@@ -226,6 +226,13 @@ for the same reason. A database saved in WAL mode opens without whatever its
   type DuckDB guessed makes it read every column as text. A table too
   large for DuckDB's 1 GB is read straight from the file instead, about a
   second a page.
+- **SQL.** The SQL button (Ctrl+E) opens a query box over the table: the
+  file is the table `data`, Ctrl+Enter runs, and the result is paged and
+  exported like the rows (the first 10,000 rows of it are kept). It offers
+  a few queries made from the file's own columns to start from:
+  `SUMMARIZE data`, rows per a text column, a total per it, the largest
+  values, rows per month. Stop ends DuckDB's worker, which holds the
+  table, so the file is read again.
 - **What it cannot do.** The file is not editable in this mode. Convert to
   JSON and Export → Download these rows take the rows as the table shows
   them, up to 100,000.
