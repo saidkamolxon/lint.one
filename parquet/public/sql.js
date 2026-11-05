@@ -135,9 +135,10 @@ async function open({ file, format }) {
    works. Short rows are padded with nulls rather than refused, as the CSV
    tool marks them rather than refusing them.
 
-   The page reads `data`, a view over it with each row's number as __r.
+   The page reads `lint_rows`, a view over it with each row's number as
+   __r, and a query reads `data`, the same rows without that number.
    Whether the first line is a header is decided once here, and switching
-   it (setHeader) changes only that view, never the read. */
+   it (setHeader) changes only those views, never the read. */
 async function openCSV(file) {
   isTable = true;
   rowNumbers = false;
@@ -146,6 +147,7 @@ async function openCSV(file) {
   const source = (extra) => `read_csv('data.csv', null_padding = true, sample_size = 102400${extra})`;
   const oom = (err) => /Out of Memory/i.test(String(err && err.message));
   conn.query('DROP VIEW IF EXISTS data');
+  conn.query('DROP VIEW IF EXISTS lint_rows');
   conn.query('DROP TABLE IF EXISTS data_raw');
   conn.query('DROP VIEW IF EXISTS data_raw');
   let typed = true, extra = '';
@@ -230,16 +232,23 @@ function setHeader({ on }) {
     view = 'SELECT rowid AS __r, ' + raw.map((n, i) => `${q(n)} AS ${q(names[i])}`).join(', ') +
       ' FROM data_raw WHERE rowid > 0';
   }
-  conn.query('CREATE OR REPLACE VIEW data AS ' + view);
-  const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
+  if (csv.table) {
+    conn.query('CREATE OR REPLACE VIEW lint_rows AS ' + view);
+    conn.query('CREATE OR REPLACE VIEW data AS SELECT * EXCLUDE (__r) FROM lint_rows');
+  } else {
+    conn.query('CREATE OR REPLACE VIEW data AS ' + view);
+  }
+  const table = conn.query('SELECT * FROM data LIMIT 0');
   fields = table.schema.fields;
   csv.base = Number(conn.query('SELECT count(*) AS n FROM data').get(0).n);
   csv.rows = csv.base + (csv.namesRow ? 1 : 0);
   return { rows: csv.rows, columns: columnsOf(table.schema), header: csv.on, canToggle: csv.table };
 }
 
-/* every column of `data` but the row number the CSV view adds */
+/* every column but the row number lint_rows adds */
 const star = () => isTable && csv && csv.table ? '* EXCLUDE (__r)' : '*';
+/* the relation the grid pages through: lint_rows for a CSV in memory */
+const rel = () => isTable && csv && csv.table ? 'lint_rows' : 'data';
 
 /* ==========================================================================
    From Arrow to what values.js reads
@@ -519,7 +528,7 @@ function selection(order, filter) {
   if (sel && sel.key === key) return sel;
   const { where: w, arg } = filterOf(filter);
   const by = order ? orderBy(order) + ', __r' : ' ORDER BY __r';
-  run('CREATE OR REPLACE TEMP TABLE lint_sel AS SELECT __r FROM data' + w + by, arg);
+  run('CREATE OR REPLACE TEMP TABLE lint_sel AS SELECT __r FROM lint_rows' + w + by, arg);
   sel = { key, n: Number(conn.query('SELECT count(*) AS n FROM lint_sel').get(0).n) };
   counts.set(filter, sel.n);
   return sel;
@@ -562,7 +571,7 @@ function rowsCSV(offset, limit, order, filter) {
 function pageCSV(off, n, order, filter) {
   let cols, out, total;
   if (n <= 0) {
-    const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
+    const table = conn.query('SELECT * FROM data LIMIT 0');
     return { cols: columnsOf(table.schema), out: [], total: filter ? counts.get(filter) : csv.base };
   }
   if (!order && (!filter || off === 0) && !(sel && sel.key === JSON.stringify([order, filter]))) {
@@ -570,7 +579,7 @@ function pageCSV(off, n, order, filter) {
        comes the same way, before anything is counted; the count (count())
        keeps the matches for the pages after it */
     const { where: w, arg } = filterOf(filter);
-    const table = run(`SELECT ${star()} FROM data${w} LIMIT ${n} OFFSET ${off}`, arg);
+    const table = run(`SELECT * FROM data${w} LIMIT ${n} OFFSET ${off}`, arg);
     cols = columnsOf(table.schema);
     out = rowsOf(table, n);
     total = filter ? counts.get(filter) : csv.base;
@@ -582,8 +591,8 @@ function pageCSV(off, n, order, filter) {
     const list = [];
     for (let i = 0; i < ids.numRows; i++) list.push(Number(ids.getChildAt(0).get(i)));
     const table = conn.query(list.length
-      ? `SELECT * FROM data WHERE __r IN (${list.join(',')})`
-      : 'SELECT * FROM data LIMIT 0');
+      ? `SELECT * FROM lint_rows WHERE __r IN (${list.join(',')})`
+      : 'SELECT * FROM lint_rows LIMIT 0');
     const ri = table.schema.fields.findIndex((f) => f.name === '__r');
     const at = new Map(list.map((id, i) => [id, i]));
     out = new Array(list.length);
@@ -705,7 +714,7 @@ function exportText({ view, order, filter, format }) {
   } else {
     const { where: w, arg } = filterOf(filter);
     const by = isTable && csv.table ? (order ? orderBy(order) + ', __r' : ' ORDER BY __r') : orderBy(order);
-    const table = run(`SELECT ${star()} FROM data` + w + by + ` LIMIT ${EXPORT_CAP + 1}`, arg);
+    const table = run(`SELECT ${star()} FROM ${rel()}` + w + by + ` LIMIT ${EXPORT_CAP + 1}`, arg);
     cols = columnsOf(table.schema);
     data = rowsOf(table, EXPORT_CAP);
     clipped = table.numRows > EXPORT_CAP;

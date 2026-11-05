@@ -114,6 +114,41 @@ body.big-file .tool-actions { visibility: visible !important; }
   animation: big-slide 1.2s ease-in-out infinite; }
 @keyframes big-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) { .big-note .bar span { animation: none; width: 100%; } }
+
+/* ---------- SQL on a large file (body.big-sql) ---------- */
+#btnBigSql { font-size: var(--fs-small); font-weight: 600; padding: 3px 10px; flex: none; }
+#btnBigSql[aria-pressed="true"] { background: var(--hue); border-color: var(--hue); color: var(--hue-ink); }
+body.big-sql #treePane .search-wrap, body.big-sql .header-toggle, body.big-sql #matchCount,
+body.big-sql #btnExpand { display: none; }
+body.big-sql .big-pager { margin-left: auto; }
+#bigSql {
+  flex: none; display: flex; flex-direction: column;
+  border-bottom: var(--hairline) solid var(--line);
+  background: var(--raised);
+}
+#bigSql[hidden] { display: none; }
+#bigSqlText {
+  display: block; width: 100%; box-sizing: border-box;
+  min-height: 84px; height: 116px; max-height: 50vh; resize: vertical;
+  font-family: var(--mono); font-size: var(--code-size, var(--fs-base)); line-height: 1.55;
+  color: var(--ink); background: var(--sunken);
+  border: none; border-bottom: var(--hairline) solid var(--line);
+  padding: var(--s3); outline: none; tab-size: 2;
+}
+#bigSqlText:focus { background: var(--surface); }
+.sql-bar { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); flex-wrap: wrap; }
+.sql-bar .primary { padding: 4px 14px; }
+#bigSqlMsg { font-size: var(--fs-small); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 0; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bigSqlMsg.err { color: var(--bad); font-weight: 500; white-space: pre-wrap; font-family: var(--mono); }
+.sql-examples { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.sql-examples .lbl { font-size: var(--fs-micro); color: var(--faint); margin-right: 2px; }
+.sql-examples button {
+  font-size: var(--fs-small); padding: 2px 9px; border-radius: 999px;
+  border: var(--hairline) solid var(--line); color: var(--muted);
+}
+.sql-examples button:hover { color: var(--ink); border-color: var(--line-strong); }
+.big-note code { font-family: var(--mono); color: var(--ink); }
 </style>
 </head>
 <body>
@@ -484,7 +519,7 @@ function openBig(file) {
   sortCol = null; sortDir = 1;
   big = { file: file, worker: null, calls: {}, nextId: 0, info: null, offset: 0, order: null,
           filter: document.getElementById('search').value.trim(), total: null, seq: 0, page: null,
-          cache: new Map(), gen: 0 };
+          cache: new Map(), gen: 0, mode: 'rows', q: null, running: false, reopenSql: null };
   document.body.classList.add('big-file');
   LintApp.setDocument(file.name, function () { closeBig(); });
   document.getElementById('bigPager').hidden = false;
@@ -556,7 +591,13 @@ function bigLoadFile() {
     if (!info.canToggle) chk.parentNode.title = 'This file is read straight from disk, as DuckDB found it';
     b.secs = (performance.now() - t0) / 1000;
     bigStatusLine();
+    document.getElementById('btnBigSql').hidden = false;
     bigPage();
+    if (b.reopenSql !== null) {
+      document.getElementById('bigSqlText').value = b.reopenSql;
+      bigSqlOpen(true);
+      document.getElementById('bigSqlMsg').textContent = 'Stopped. The file was read again; the query is as you left it.';
+    }
   }, function (err) {
     if (big !== b) return;
     bigStatus('err', err.message);
@@ -633,6 +674,7 @@ function bigPage() {
     if (big !== b || seq !== b.seq) return;
     if (d.total !== null && d.total !== undefined) b.total = d.total;
     b.page = d;
+    if (b.mode === 'sql') return;
     bigRender();
     if (want.filter && (b.total === null || b.total === undefined)) {
       return bigRpc('count', { filter: want.filter }).then(function (c) {
@@ -661,19 +703,23 @@ function bigCell(v) {
 }
 
 function bigRender() {
-  var d = big.page, treeEl = document.getElementById('tree');
-  var cols = big.info.columns;
+  var sql = big.mode === 'sql';
+  if (sql && !(big.q && big.q.columns)) { bigSqlShow(); return; }
+  var d = sql ? { rows: big.q.rows } : big.page, treeEl = document.getElementById('tree');
+  if (!d) return;
+  var cols = sql ? big.q.columns : big.info.columns;
+  var base = sql ? big.q.offset : big.offset;
   var NUM = { int: 1, float: 1, decimal: 1 };
   var html = '<table class="csv-table"><thead><tr><th class="rn"></th>';
   cols.forEach(function (c, h) {
-    var arrow = big.order && big.order.col === c.name
+    var arrow = !sql && big.order && big.order.col === c.name
       ? '<span class="sort">' + (big.order.dir === 1 ? '▲' : '▼') + '</span>' : '';
-    html += '<th data-col="' + h + '" title="Sort by this column">' + esc(c.name) + arrow +
+    html += '<th' + (sql ? '' : ' data-col="' + h + '" title="Sort by this column"') + '>' + esc(c.name) + arrow +
       '<span class="coltype">' + esc(c.type) + '</span></th>';
   });
   html += '</tr></thead><tbody>';
   d.rows.forEach(function (row, i) {
-    html += '<tr><td class="rn">' + LintApp.fmtNum(big.offset + i + 1) + '</td>';
+    html += '<tr><td class="rn">' + LintApp.fmtNum(base + i + 1) + '</td>';
     row.forEach(function (v, c) {
       var x = bigCell(v);
       var cls = x.cls || (NUM[cols[c].kind] ? 'num' : '');
@@ -691,6 +737,14 @@ function bigRender() {
 
 function bigPager() {
   var pos = document.getElementById('bigPos');
+  if (big.mode === 'sql') {
+    var r = big.q, n = r.rows.length;
+    pos.textContent = n ? LintApp.fmtNum(r.offset + 1) + '–' + LintApp.fmtNum(r.offset + n) + ' of ' +
+      LintApp.fmtNum(r.total) + (r.more ? '+' : '') : '';
+    document.getElementById('btnBigPrev').disabled = r.offset === 0;
+    document.getElementById('btnBigNext').disabled = r.offset + n >= r.total;
+    return;
+  }
   var shown = big.page ? big.page.rows.length : 0;
   var total = big.total;
   pos.textContent = shown
@@ -705,6 +759,7 @@ function bigPager() {
 }
 
 function bigTurn(dir) {
+  if (big && big.mode === 'sql') { bigSqlTurn(dir); return; }
   if (!big || !big.page) return;
   var next = big.offset + dir * BIG_PAGE;
   if (next < 0 || (dir > 0 && big.page.rows.length < BIG_PAGE)) return;
@@ -717,7 +772,9 @@ function bigToJson() {
   var b = big;
   if (!b.info) return;
   LintApp.toast('Converting…');
-  bigRpc('export', { view: 'grid', order: b.order, filter: b.filter, format: 'json' }).then(function (d) {
+  if (b.mode === 'sql' && !(b.q && b.q.columns)) { LintApp.toast('Run a query that returns rows first'); return; }
+  bigRpc('export', b.mode === 'sql' ? { view: 'query', format: 'json' }
+    : { view: 'grid', order: b.order, filter: b.filter, format: 'json' }).then(function (d) {
     LintApp.copyAndOffer(d.text, 'JSON', 'csv', 'json');
     if (d.clipped) LintApp.toast('The first ' + LintApp.fmtNum(d.rows) + ' rows, as JSON. For the rest, use a filter.');
   }, function (err) { LintApp.toast(err.message); });
@@ -728,8 +785,10 @@ function bigDownload() {
   var b = big;
   if (!b || !b.info) return;
   LintApp.toast('Preparing…');
-  bigRpc('export', { view: 'grid', order: b.order, filter: b.filter, format: 'csv' }).then(function (d) {
-    var name = b.file.name.replace(/\.[^.]+$/, '') + (b.filter || b.order ? '-rows' : '-first') + '.csv';
+  if (b.mode === 'sql' && !(b.q && b.q.columns)) { LintApp.toast('Run a query that returns rows first'); return; }
+  bigRpc('export', b.mode === 'sql' ? { view: 'query', format: 'csv' }
+    : { view: 'grid', order: b.order, filter: b.filter, format: 'csv' }).then(function (d) {
+    var name = b.file.name.replace(/\.[^.]+$/, '') + (b.mode === 'sql' ? '-query' : b.filter || b.order ? '-rows' : '-first') + '.csv';
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([d.text], { type: 'text/csv' }));
     a.download = name;
@@ -739,12 +798,140 @@ function bigDownload() {
   }, function (err) { LintApp.toast(err.message); });
 }
 
+/* ==========================================================================
+   SQL on a large file. The table DuckDB read is `data`; a query's result
+   is kept in the worker (up to 10,000 rows) and paged like the rows.
+   ========================================================================== */
+function bigSqlOpen(on) {
+  if (!big || !big.info) return;
+  big.mode = on ? 'sql' : 'rows';
+  document.body.classList.toggle('big-sql', on);
+  document.getElementById('bigSql').hidden = !on;
+  document.getElementById('btnBigSql').setAttribute('aria-pressed', String(on));
+  if (on) {
+    var ta = document.getElementById('bigSqlText');
+    if (!ta.value) ta.value = 'SELECT *\nFROM data\nLIMIT 100;';
+    bigExamples();
+    bigSqlShow();
+    ta.focus();
+  } else {
+    bigRender();
+  }
+}
+
+/* a few queries to start from, made from this file's own columns */
+function bigExamples() {
+  var cols = big.info.columns;
+  var q = function (n) { return '"' + String(n).replace(/"/g, '""') + '"'; };
+  var text = cols.filter(function (c) { return c.kind === 'text'; })[0];
+  var num = cols.filter(function (c) { return c.kind === 'int' || c.kind === 'float' || c.kind === 'decimal'; })
+    .filter(function (c) { return !/^(id|.*_id)$/i.test(c.name); })[0];
+  var when = cols.filter(function (c) { return c.kind === 'date' || c.kind === 'time'; })[0];
+  var ex = [['Every column, summarised', 'SUMMARIZE data;']];
+  if (text) ex.push(['Rows per ' + text.name, 'SELECT ' + q(text.name) + ', count(*) AS rows\nFROM data\nGROUP BY 1\nORDER BY rows DESC;']);
+  if (text && num) ex.push(['Total ' + num.name + ' per ' + text.name, 'SELECT ' + q(text.name) + ', sum(' + q(num.name) + ') AS total, avg(' + q(num.name) + ') AS average\nFROM data\nGROUP BY 1\nORDER BY total DESC;']);
+  if (num) ex.push(['Largest ' + num.name, 'SELECT *\nFROM data\nORDER BY ' + q(num.name) + ' DESC\nLIMIT 10;']);
+  if (when) ex.push(['Rows per month', "SELECT date_trunc('month', " + q(when.name) + ') AS month, count(*) AS rows\nFROM data\nGROUP BY 1\nORDER BY 1;']);
+  var box = document.getElementById('bigSqlEx');
+  box.innerHTML = '<span class="lbl">Try</span>' + ex.map(function (e, i) {
+    return '<button type="button" data-i="' + i + '" title="' + esc(e[1].replace(/\n/g, ' ')) + '">' + esc(e[0]) + '</button>';
+  }).join('');
+  box.onclick = function (e) {
+    var b = e.target.closest('button[data-i]');
+    if (!b) return;
+    document.getElementById('bigSqlText').value = ex[+b.dataset.i][1];
+    bigRun();
+  };
+}
+
+/* what the table shows in SQL mode: the last result, or how to start */
+function bigSqlShow() {
+  var r = big.q;
+  if (r && r.columns) { bigRender(); return; }
+  bigNote('', r && r.ran ? 'The statement ran' : 'Ask the file anything',
+    r && r.ran ? 'It returned no rows.' : 'The file is the table data. Write a query and press ' +
+    (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl') + '+Enter, or start from one below. DuckDB runs it on your device.', false);
+  document.getElementById('bigPos').textContent = '';
+  document.getElementById('btnBigPrev').disabled = document.getElementById('btnBigNext').disabled = true;
+}
+
+function bigMs(t) { return t < 1000 ? Math.round(t) + ' ms' : (t / 1000).toFixed(1) + ' s'; }
+
+function bigRun() {
+  var b = big;
+  if (!b || !b.info || b.running) return;
+  var sql = document.getElementById('bigSqlText').value;
+  if (!sql.trim()) return;
+  var msg = document.getElementById('bigSqlMsg');
+  msg.className = '';
+  msg.textContent = 'Running…';
+  b.running = true;
+  document.getElementById('tree').classList.add('stale');
+  /* a quick query never flashes a Stop button */
+  var stopTimer = setTimeout(function () {
+    document.getElementById('btnBigStop').hidden = false;
+    document.getElementById('btnBigRun').hidden = true;
+  }, 400);
+  var t0 = performance.now();
+  bigRpc('query', { sql: sql }).then(function (d) {
+    if (big !== b) return;
+    var t = performance.now() - t0;
+    b.q = { ran: true, columns: d.columns, rows: d.rows || [], offset: 0, total: d.total || 0, more: d.more };
+    msg.textContent = d.columns
+      ? LintApp.fmtNum(d.total) + (d.more ? '+' : '') + (d.total === 1 ? ' row' : ' rows') +
+        (d.more ? ' (the first ' + LintApp.fmtNum(d.total) + ' are kept)' : '') + ' in ' + bigMs(t)
+      : (d.ran === 1 ? 'Ran' : 'Ran ' + d.ran + ' statements') + ' in ' + bigMs(t);
+    if (b.mode === 'sql') bigSqlShow();
+  }, function (err) {
+    if (big !== b) return;
+    document.getElementById('tree').classList.remove('stale');
+    if (err.message === 'stopped') return;
+    msg.className = 'err';
+    msg.textContent = err.message;
+  }).then(function () {
+    clearTimeout(stopTimer);
+    b.running = false;
+    document.getElementById('btnBigStop').hidden = true;
+    document.getElementById('btnBigRun').hidden = false;
+  });
+}
+
+/* Stop ends the worker, which holds the table: the file is read again */
+function bigStop() {
+  var b = big;
+  if (!b || !b.running) return;
+  var file = b.file, sqlText = document.getElementById('bigSqlText').value;
+  Object.keys(b.calls).forEach(function (k) { b.calls[k].reject(new Error('stopped')); });
+  b.calls = {};
+  openBig(file);
+  big.reopenSql = sqlText;
+  document.getElementById('bigSqlMsg').textContent = 'Stopped. The file is being read again.';
+}
+
+/* a result page beyond what the worker sent first */
+function bigSqlTurn(dir) {
+  var b = big, r = b.q;
+  if (!r || !r.columns) return;
+  var next = r.offset + dir * BIG_PAGE;
+  if (next < 0 || next >= r.total) return;
+  bigRpc('page', { from: next, limit: BIG_PAGE }).then(function (d) {
+    if (big !== b) return;
+    r.rows = d.rows;
+    r.offset = next;
+    bigRender();
+  }, function (err) { LintApp.toast(err.message); });
+}
+
 /* quiet: another document is taking its place */
 function closeBig(quiet) {
   if (!big) return;
   if (big.worker) big.worker.terminate();
   big = null;
   document.body.classList.remove('big-file');
+  document.body.classList.remove('big-sql');
+  document.getElementById('bigSql').hidden = true;
+  document.getElementById('btnBigSql').hidden = true;
+  document.getElementById('btnBigSql').setAttribute('aria-pressed', 'false');
   document.getElementById('bigPager').hidden = true;
   document.getElementById('matchCount').textContent = '';
   var chk = document.getElementById('chkHeader');
@@ -834,7 +1021,7 @@ document.getElementById('tree').addEventListener('click', function (e) {
   if (!th) return;
   var col = parseInt(th.dataset.col, 10);
   if (big) {
-    if (!big.info) return;
+    if (!big.info || big.mode === 'sql') return;
     var name = big.info.columns[col].name;
     big.order = big.order && big.order.col === name
       ? (big.order.dir === 1 ? { col: name, dir: -1 } : null)
@@ -913,6 +1100,39 @@ headerToggle.insertAdjacentHTML('afterend',
     '<button type="button" class="icon-btn" id="btnBigNext" title="Next 200 rows" aria-label="Next rows">' +
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>' +
   '</span>');
+/* SQL: its button in the bar, its box over the table */
+document.getElementById('bigPager').insertAdjacentHTML('beforebegin',
+  '<button type="button" id="btnBigSql" class="bordered" aria-pressed="false" hidden ' +
+  'title="Run SQL on this file (' + (/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl') + '+E)">SQL</button>');
+document.querySelector('#treePane .treebar').insertAdjacentHTML('afterend',
+  '<div id="bigSql" hidden>' +
+    '<textarea id="bigSqlText" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="SQL"></textarea>' +
+    '<div class="sql-bar">' +
+      '<button type="button" id="btnBigRun" class="primary" title="Run (Ctrl+Enter)">Run</button>' +
+      '<button type="button" id="btnBigStop" class="bordered" title="Stop the query (Esc)" hidden>Stop</button>' +
+      '<span id="bigSqlMsg"></span>' +
+      '<span class="sql-examples" id="bigSqlEx"></span>' +
+    '</div>' +
+  '</div>');
+document.getElementById('btnBigSql').addEventListener('click', function () { bigSqlOpen(!big || big.mode !== 'sql'); });
+document.getElementById('btnBigRun').addEventListener('click', bigRun);
+document.getElementById('btnBigStop').addEventListener('click', bigStop);
+document.getElementById('bigSqlText').addEventListener('keydown', function (e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); bigRun(); return; }
+  if (e.key === 'Escape' && big && big.running) { e.preventDefault(); bigStop(); return; }
+  /* Tab indents, as in every SQL editor */
+  if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    document.execCommand('insertText', false, '  ');
+  }
+});
+document.addEventListener('keydown', function (e) {
+  if (!big || !big.info) return;
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'e') {
+    e.preventDefault();
+    bigSqlOpen(big.mode !== 'sql');
+  }
+});
 document.getElementById('btnBigPrev').addEventListener('click', function () { bigTurn(-1); });
 document.getElementById('btnBigNext').addEventListener('click', function () { bigTurn(1); });
 /* the editor's Copy and Download have no text to copy for a large file */
