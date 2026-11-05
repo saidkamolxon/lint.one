@@ -27,7 +27,7 @@ let db = null;
 let conn = null;
 let rowNumbers = true;        // whether read_parquet could add file_row_number
 let isTable = false;          // a CSV, read by openCSV
-let csv = null;               // that CSV: {names, detected, on, table, union, rows}
+let csv = null;               // that CSV: {names, detected, on, table, namesRow, base, rows}
 let sel = null;               // {key, n}: the rows a sort or filter picked, in order, in lint_sel
 let fields = [];              // the file's columns, with their Arrow types
 const held = new Map();       // 'grid' | 'query' -> {cols, rows}
@@ -177,7 +177,7 @@ async function openCSV(file) {
   } catch (e) { /* the read worked; this is only for the status line */ }
   csv = {
     names: conn.query('SELECT * FROM data_raw LIMIT 0').schema.fields.map((f) => f.name),
-    detected, on: detected, table: inMemory, union: false, rows: 0
+    detected, on: detected, table: inMemory, namesRow: null, base: 0, rows: 0
   };
   return { engine: ENGINE, delim, typed, inMemory, ...setHeader({ on: detected }) };
 }
@@ -191,8 +191,11 @@ function letters(i) {
 
 /* The view `data` with the first line as names (on) or as a row (off).
    - as DuckDB read it: every row, numbered by rowid;
-   - a header DuckDB found, taken as a row: the names become row -1, and
-     every column is text, since the names are text;
+   - a header DuckDB found, taken as a row: the columns are named A, B, C
+     and keep their types, and the names are put before the rows as the
+     page is read (namesRow). Making them a row of the view instead meant
+     casting every value of every column to text, which on millions of rows
+     made a sort take minutes, and sorted numbers as text;
    - a first row DuckDB took as data, taken as the header: its values name
      the columns, and the rows start after it.
    A file read straight from disk has no rowid to number its rows by, so it
@@ -203,7 +206,7 @@ function setHeader({ on }) {
   counts.clear();
   const raw = csv.names;
   csv.on = on;
-  csv.union = false;
+  csv.namesRow = null;
   let view;
   if (!csv.table) {
     csv.on = csv.detected;
@@ -211,10 +214,8 @@ function setHeader({ on }) {
   } else if (on === csv.detected) {
     view = 'SELECT rowid AS __r, * FROM data_raw';
   } else if (!on) {
-    csv.union = true;
-    const as = raw.map((n, i) => `${lit(n)} AS ${q(letters(i))}`).join(', ');
-    const cast = raw.map((n, i) => `CAST(${q(n)} AS VARCHAR) AS ${q(letters(i))}`).join(', ');
-    view = `SELECT -1 AS __r, ${as} UNION ALL SELECT rowid, ${cast} FROM data_raw`;
+    csv.namesRow = raw.slice();
+    view = 'SELECT rowid AS __r, ' + raw.map((n, i) => `${q(n)} AS ${q(letters(i))}`).join(', ') + ' FROM data_raw';
   } else {
     const first = conn.query('SELECT * FROM data_raw LIMIT 1');
     const seen = new Set();
@@ -232,11 +233,11 @@ function setHeader({ on }) {
   conn.query('CREATE OR REPLACE VIEW data AS ' + view);
   const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
   fields = table.schema.fields;
-  csv.rows = Number(conn.query('SELECT count(*) AS n FROM data').get(0).n);
+  csv.base = Number(conn.query('SELECT count(*) AS n FROM data').get(0).n);
+  csv.rows = csv.base + (csv.namesRow ? 1 : 0);
   return { rows: csv.rows, columns: columnsOf(table.schema), header: csv.on, canToggle: csv.table };
 }
 
-const lit = (v) => "'" + String(v).replace(/'/g, "''") + "'";
 /* every column of `data` but the row number the CSV view adds */
 const star = () => isTable && csv && csv.table ? '* EXCLUDE (__r)' : '*';
 
@@ -524,11 +525,47 @@ function selection(order, filter) {
   return sel;
 }
 
+/* Whether the header taken as a row (namesRow) is among the rows a filter
+   keeps: a name containing the term, in the named column when there is one */
+function namesMatch(filter) {
+  const names = csv.namesRow;
+  if (!names) return false;
+  if (!filter || !filter.trim()) return true;
+  const m = /^\s*([^\s:]+)\s*:\s*(.*)$/s.exec(filter);
+  if (m) {
+    const i = fields.findIndex((f) => f.name.toLowerCase() === m[1].toLowerCase());
+    if (i >= 0) return names[i].toLowerCase().includes(m[2].trim().toLowerCase());
+  }
+  const term = filter.trim().toLowerCase();
+  return names.some((n) => n.toLowerCase().includes(term));
+}
+
+/* A page of a CSV's rows. The header taken as a row, when it is, comes
+   first whatever the sort, as a header would; the table's rows follow. */
 function rowsCSV(offset, limit, order, filter) {
   const n = Math.min(PAGE_CAP, Math.max(1, limit | 0));
   const off = Math.max(0, offset | 0);
+  const extra = namesMatch(filter) ? 1 : 0;
+  let page;
+  if (extra && off === 0) {
+    page = pageCSV(0, n - 1, order, filter);
+    page.out.unshift(csv.namesRow.slice());
+  } else {
+    page = pageCSV(off - extra, n, order, filter);
+  }
+  const { cols, out } = page;
+  const total = page.total === undefined || page.total === null ? null : page.total + extra;
+  held.set('grid', { cols, rows: out });
+  return { columns: cols, rows: out.map((r) => r.map((v, i) => light(v, cols[i]))), total };
+}
+
+function pageCSV(off, n, order, filter) {
   let cols, out, total;
-  if (!order && !csv.union && (!filter || off === 0) && !(sel && sel.key === JSON.stringify([order, filter]))) {
+  if (n <= 0) {
+    const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
+    return { cols: columnsOf(table.schema), out: [], total: filter ? counts.get(filter) : csv.base };
+  }
+  if (!order && (!filter || off === 0) && !(sel && sel.key === JSON.stringify([order, filter]))) {
     /* the file's own order: straight from the table. A filter's first page
        comes the same way, before anything is counted; the count (count())
        keeps the matches for the pages after it */
@@ -536,7 +573,7 @@ function rowsCSV(offset, limit, order, filter) {
     const table = run(`SELECT ${star()} FROM data${w} LIMIT ${n} OFFSET ${off}`, arg);
     cols = columnsOf(table.schema);
     out = rowsOf(table, n);
-    total = filter ? counts.get(filter) : csv.rows;
+    total = filter ? counts.get(filter) : csv.base;
     if (total === undefined && out.length < n) total = out.length;
   } else {
     const s = selection(order, filter);
@@ -554,13 +591,15 @@ function rowsCSV(offset, limit, order, filter) {
     out = out.filter(Boolean);
     cols = columnsOf(table.schema).filter((c) => c.name !== '__r');
   }
-  held.set('grid', { cols, rows: out });
-  return { columns: cols, rows: out.map((r) => r.map((v, i) => light(v, cols[i]))), total: total === undefined ? null : total };
+  return { cols, out, total };
 }
 
 function count({ filter }) {
+  if (isTable && csv.table) {
+    const base = !filter ? csv.base : counts.has(filter) ? counts.get(filter) : selection(null, filter).n;
+    return { n: base + (namesMatch(filter) ? 1 : 0) };
+  }
   if (counts.has(filter)) return { n: counts.get(filter) };
-  if (isTable && csv.table && filter) return { n: selection(null, filter).n };
   const { where: w, arg } = filterOf(filter);
   const n = Number(run('SELECT count(*) AS n FROM data' + w, arg).get(0).n);
   counts.set(filter, n);
@@ -670,6 +709,10 @@ function exportText({ view, order, filter, format }) {
     cols = columnsOf(table.schema);
     data = rowsOf(table, EXPORT_CAP);
     clipped = table.numRows > EXPORT_CAP;
+    if (isTable && csv.table && namesMatch(filter)) {
+      data.unshift(csv.namesRow.slice());
+      if (data.length > EXPORT_CAP) { data.pop(); clipped = true; }
+    }
   }
   const text = format === 'json' ? toJSON(cols, data) : toCSV(cols, data);
   return { text, rows: data.length, clipped };
