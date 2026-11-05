@@ -26,7 +26,9 @@ const ENGINE = 'DuckDB 1.5.4';
 let db = null;
 let conn = null;
 let rowNumbers = true;        // whether read_parquet could add file_row_number
-let isTable = false;          // a CSV, read into the table `data`
+let isTable = false;          // a CSV, read by openCSV
+let csv = null;               // that CSV: {names, detected, on, table, namesRow, base, rows}
+let sel = null;               // {key, n}: the rows a sort or filter picked, in order, in lint_sel
 let fields = [];              // the file's columns, with their Arrow types
 const held = new Map();       // 'grid' | 'query' -> {cols, rows}
 const counts = new Map();     // filter -> matching rows
@@ -108,9 +110,9 @@ async function start() {
   ].forEach((s) => conn.query(s));
 }
 
-async function open({ file, format, header }) {
+async function open({ file, format }) {
   await start();
-  if (format === 'csv') return openCSV(file, header);
+  if (format === 'csv') return openCSV(file);
   isTable = false;
   db.registerFileHandle('data.parquet', file, DuckDBDataProtocol.BROWSER_FILEREADER, true);
   conn.query("CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('data.parquet')");
@@ -126,31 +128,35 @@ async function open({ file, format, header }) {
   return { engine: ENGINE };
 }
 
-/* A CSV, read once into the table `data`. DuckDB finds the delimiter, the
-   header and each column's type from a sample; when a value further down
-   does not fit the type it guessed (a "n/a" deep in a column of numbers),
-   the file is read again with every column as text, which always works.
-   Short rows are padded with nulls rather than refused, as the CSV tool
-   marks them rather than refusing them. header: true, false, or omitted
-   for DuckDB to decide. */
-async function openCSV(file, header) {
+/* A CSV, read once into the table `data_raw`. DuckDB finds the delimiter,
+   the header and each column's type from a sample; when a value further
+   down does not fit the type it guessed (a "n/a" deep in a column of
+   numbers), the file is read again with every column as text, which always
+   works. Short rows are padded with nulls rather than refused, as the CSV
+   tool marks them rather than refusing them.
+
+   The page reads `data`, a view over it with each row's number as __r.
+   Whether the first line is a header is decided once here, and switching
+   it (setHeader) changes only that view, never the read. */
+async function openCSV(file) {
   isTable = true;
   rowNumbers = false;
+  sel = null;
   db.registerFileHandle('data.csv', file, DuckDBDataProtocol.BROWSER_FILEREADER, true);
-  const head = header === true ? ', header = true' : header === false ? ', header = false' : '';
-  const source = (extra) => `read_csv('data.csv', null_padding = true, sample_size = 102400${head}${extra})`;
+  const source = (extra) => `read_csv('data.csv', null_padding = true, sample_size = 102400${extra})`;
   const oom = (err) => /Out of Memory/i.test(String(err && err.message));
   conn.query('DROP VIEW IF EXISTS data');
-  conn.query('DROP TABLE IF EXISTS data');
+  conn.query('DROP TABLE IF EXISTS data_raw');
+  conn.query('DROP VIEW IF EXISTS data_raw');
   let typed = true, extra = '';
   try {
-    conn.query('CREATE TABLE data AS SELECT * FROM ' + source(''));
+    conn.query('CREATE TABLE data_raw AS SELECT * FROM ' + source(''));
   } catch (err) {
     if (!oom(err)) {
       typed = false;
       extra = ', all_varchar = true';
       try {
-        conn.query('CREATE TABLE data AS SELECT * FROM ' + source(extra));
+        conn.query('CREATE TABLE data_raw AS SELECT * FROM ' + source(extra));
       } catch (err2) {
         if (!oom(err2)) throw err2;
       }
@@ -160,28 +166,80 @@ async function openCSV(file, header) {
      instead. Every page and sort is then a pass over the file, seconds
      rather than milliseconds, but it opens. */
   let inMemory = true;
-  try { conn.query('SELECT 1 FROM data LIMIT 0'); } catch (e) { inMemory = false; }
-  if (!inMemory) {
-    isTable = false;
-    conn.query('CREATE VIEW data AS SELECT * FROM ' + source(extra));
-  }
-  let delim = null, hasHeader = header;
+  try { conn.query('SELECT 1 FROM data_raw LIMIT 0'); } catch (e) { inMemory = false; }
+  if (!inMemory) conn.query('CREATE VIEW data_raw AS SELECT * FROM ' + source(extra));
+
+  let delim = null, detected = true;
   try {
-    const s = conn.query(`SELECT Delimiter AS d, HasHeader AS h FROM sniff_csv('data.csv'${head}, sample_size = 102400)`);
+    const s = conn.query("SELECT Delimiter AS d, HasHeader AS h FROM sniff_csv('data.csv', sample_size = 102400)");
     delim = s.get(0).d;
-    if (hasHeader === undefined || hasHeader === null) hasHeader = !!s.get(0).h;
-  } catch (e) { /* only for the status line */ }
-  const table = conn.query('SELECT * FROM data LIMIT 0');
-  fields = table.schema.fields;
+    detected = !!s.get(0).h;
+  } catch (e) { /* the read worked; this is only for the status line */ }
+  csv = {
+    names: conn.query('SELECT * FROM data_raw LIMIT 0').schema.fields.map((f) => f.name),
+    detected, on: detected, table: inMemory, namesRow: null, base: 0, rows: 0
+  };
+  return { engine: ENGINE, delim, typed, inMemory, ...setHeader({ on: detected }) };
+}
+
+/* A, B, … Z, AA: a column's name when the file gives it none */
+function letters(i) {
+  let s = '';
+  for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + (i - 1) % 26) + s;
+  return s;
+}
+
+/* The view `data` with the first line as names (on) or as a row (off).
+   - as DuckDB read it: every row, numbered by rowid;
+   - a header DuckDB found, taken as a row: the columns are named A, B, C
+     and keep their types, and the names are put before the rows as the
+     page is read (namesRow). Making them a row of the view instead meant
+     casting every value of every column to text, which on millions of rows
+     made a sort take minutes, and sorted numbers as text;
+   - a first row DuckDB took as data, taken as the header: its values name
+     the columns, and the rows start after it.
+   A file read straight from disk has no rowid to number its rows by, so it
+   keeps the header it was read with. */
+function setHeader({ on }) {
+  sel = null;
   held.clear();
   counts.clear();
-  return {
-    engine: ENGINE,
-    rows: Number(conn.query('SELECT count(*) AS n FROM data').get(0).n),
-    columns: columnsOf(table.schema),
-    delim, header: hasHeader, typed, inMemory
-  };
+  const raw = csv.names;
+  csv.on = on;
+  csv.namesRow = null;
+  let view;
+  if (!csv.table) {
+    csv.on = csv.detected;
+    view = 'SELECT * FROM data_raw';
+  } else if (on === csv.detected) {
+    view = 'SELECT rowid AS __r, * FROM data_raw';
+  } else if (!on) {
+    csv.namesRow = raw.slice();
+    view = 'SELECT rowid AS __r, ' + raw.map((n, i) => `${q(n)} AS ${q(letters(i))}`).join(', ') + ' FROM data_raw';
+  } else {
+    const first = conn.query('SELECT * FROM data_raw LIMIT 1');
+    const seen = new Set();
+    const names = raw.map((n, i) => {
+      let v = first.numRows ? first.getChildAt(i).get(0) : null;
+      v = v === null || v === undefined || String(v).trim() === '' ? letters(i) : String(v).trim();
+      let name = v, k = 2;
+      while (seen.has(name.toLowerCase())) name = v + '_' + k++;
+      seen.add(name.toLowerCase());
+      return name;
+    });
+    view = 'SELECT rowid AS __r, ' + raw.map((n, i) => `${q(n)} AS ${q(names[i])}`).join(', ') +
+      ' FROM data_raw WHERE rowid > 0';
+  }
+  conn.query('CREATE OR REPLACE VIEW data AS ' + view);
+  const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
+  fields = table.schema.fields;
+  csv.base = Number(conn.query('SELECT count(*) AS n FROM data').get(0).n);
+  csv.rows = csv.base + (csv.namesRow ? 1 : 0);
+  return { rows: csv.rows, columns: columnsOf(table.schema), header: csv.on, canToggle: csv.table };
 }
+
+/* every column of `data` but the row number the CSV view adds */
+const star = () => isTable && csv && csv.table ? '* EXCLUDE (__r)' : '*';
 
 /* ==========================================================================
    From Arrow to what values.js reads
@@ -426,6 +484,7 @@ function orderBy(order) {
    on its own call: the first 200 matches are found long before the last
    one is, and the page need not wait for it. */
 async function rows({ offset, limit, order, filter }) {
+  if (isTable && csv.table) return rowsCSV(offset, limit, order, filter);
   const { where: w, arg } = filterOf(filter);
   const n = Math.min(PAGE_CAP, Math.max(1, limit | 0));
   const off = Math.max(0, offset | 0);
@@ -438,10 +497,7 @@ async function rows({ offset, limit, order, filter }) {
     table = run('SELECT * EXCLUDE (file_row_number) FROM lint_numbered WHERE file_row_number IN (' +
       'SELECT file_row_number FROM lint_numbered' + w + by + ` LIMIT ${n} OFFSET ${off})` + by, arg);
   } else {
-    /* a table sorts the rows it holds; its rowid keeps equal values in the
-       same order from one page to the next */
-    const by = orderBy(order) + (order && isTable ? ', rowid' : '');
-    table = run('SELECT * FROM data' + w + by + ` LIMIT ${n} OFFSET ${off}`, arg);
+    table = run('SELECT * FROM data' + w + orderBy(order) + ` LIMIT ${n} OFFSET ${off}`, arg);
   }
   const cols = columnsOf(table.schema);
   const out = rowsOf(table, n);
@@ -453,7 +509,96 @@ async function rows({ offset, limit, order, filter }) {
   return { columns: cols, rows: out.map((r) => r.map((v, i) => light(v, cols[i]))), total: total === undefined ? null : total };
 }
 
+/* The rows a sort or a filter picks, by number and in order, kept in
+   lint_sel until the next sort or filter: each page after the first is then
+   200 numbers from it and the rows they name, milliseconds however deep,
+   where running the sort again for every page cost a second on millions of
+   rows. A row number is 8 bytes, 48 MB for six million rows. */
+function selection(order, filter) {
+  const key = JSON.stringify([order, filter]);
+  if (sel && sel.key === key) return sel;
+  const { where: w, arg } = filterOf(filter);
+  const by = order ? orderBy(order) + ', __r' : ' ORDER BY __r';
+  run('CREATE OR REPLACE TEMP TABLE lint_sel AS SELECT __r FROM data' + w + by, arg);
+  sel = { key, n: Number(conn.query('SELECT count(*) AS n FROM lint_sel').get(0).n) };
+  counts.set(filter, sel.n);
+  return sel;
+}
+
+/* Whether the header taken as a row (namesRow) is among the rows a filter
+   keeps: a name containing the term, in the named column when there is one */
+function namesMatch(filter) {
+  const names = csv.namesRow;
+  if (!names) return false;
+  if (!filter || !filter.trim()) return true;
+  const m = /^\s*([^\s:]+)\s*:\s*(.*)$/s.exec(filter);
+  if (m) {
+    const i = fields.findIndex((f) => f.name.toLowerCase() === m[1].toLowerCase());
+    if (i >= 0) return names[i].toLowerCase().includes(m[2].trim().toLowerCase());
+  }
+  const term = filter.trim().toLowerCase();
+  return names.some((n) => n.toLowerCase().includes(term));
+}
+
+/* A page of a CSV's rows. The header taken as a row, when it is, comes
+   first whatever the sort, as a header would; the table's rows follow. */
+function rowsCSV(offset, limit, order, filter) {
+  const n = Math.min(PAGE_CAP, Math.max(1, limit | 0));
+  const off = Math.max(0, offset | 0);
+  const extra = namesMatch(filter) ? 1 : 0;
+  let page;
+  if (extra && off === 0) {
+    page = pageCSV(0, n - 1, order, filter);
+    page.out.unshift(csv.namesRow.slice());
+  } else {
+    page = pageCSV(off - extra, n, order, filter);
+  }
+  const { cols, out } = page;
+  const total = page.total === undefined || page.total === null ? null : page.total + extra;
+  held.set('grid', { cols, rows: out });
+  return { columns: cols, rows: out.map((r) => r.map((v, i) => light(v, cols[i]))), total };
+}
+
+function pageCSV(off, n, order, filter) {
+  let cols, out, total;
+  if (n <= 0) {
+    const table = conn.query(`SELECT ${star()} FROM data LIMIT 0`);
+    return { cols: columnsOf(table.schema), out: [], total: filter ? counts.get(filter) : csv.base };
+  }
+  if (!order && (!filter || off === 0) && !(sel && sel.key === JSON.stringify([order, filter]))) {
+    /* the file's own order: straight from the table. A filter's first page
+       comes the same way, before anything is counted; the count (count())
+       keeps the matches for the pages after it */
+    const { where: w, arg } = filterOf(filter);
+    const table = run(`SELECT ${star()} FROM data${w} LIMIT ${n} OFFSET ${off}`, arg);
+    cols = columnsOf(table.schema);
+    out = rowsOf(table, n);
+    total = filter ? counts.get(filter) : csv.base;
+    if (total === undefined && out.length < n) total = out.length;
+  } else {
+    const s = selection(order, filter);
+    total = s.n;
+    const ids = conn.query(`SELECT __r FROM lint_sel LIMIT ${n} OFFSET ${off}`);
+    const list = [];
+    for (let i = 0; i < ids.numRows; i++) list.push(Number(ids.getChildAt(0).get(i)));
+    const table = conn.query(list.length
+      ? `SELECT * FROM data WHERE __r IN (${list.join(',')})`
+      : 'SELECT * FROM data LIMIT 0');
+    const ri = table.schema.fields.findIndex((f) => f.name === '__r');
+    const at = new Map(list.map((id, i) => [id, i]));
+    out = new Array(list.length);
+    for (const r of rowsOf(table, table.numRows)) out[at.get(Number(r[ri]))] = r.filter((_, i) => i !== ri);
+    out = out.filter(Boolean);
+    cols = columnsOf(table.schema).filter((c) => c.name !== '__r');
+  }
+  return { cols, out, total };
+}
+
 function count({ filter }) {
+  if (isTable && csv.table) {
+    const base = !filter ? csv.base : counts.has(filter) ? counts.get(filter) : selection(null, filter).n;
+    return { n: base + (namesMatch(filter) ? 1 : 0) };
+  }
   if (counts.has(filter)) return { n: counts.get(filter) };
   const { where: w, arg } = filterOf(filter);
   const n = Number(run('SELECT count(*) AS n FROM data' + w, arg).get(0).n);
@@ -559,13 +704,18 @@ function exportText({ view, order, filter, format }) {
     data = h.rows;
   } else {
     const { where: w, arg } = filterOf(filter);
-    const table = run('SELECT * FROM data' + w + orderBy(order) + ` LIMIT ${EXPORT_CAP + 1}`, arg);
+    const by = isTable && csv.table ? (order ? orderBy(order) + ', __r' : ' ORDER BY __r') : orderBy(order);
+    const table = run(`SELECT ${star()} FROM data` + w + by + ` LIMIT ${EXPORT_CAP + 1}`, arg);
     cols = columnsOf(table.schema);
     data = rowsOf(table, EXPORT_CAP);
     clipped = table.numRows > EXPORT_CAP;
+    if (isTable && csv.table && namesMatch(filter)) {
+      data.unshift(csv.namesRow.slice());
+      if (data.length > EXPORT_CAP) { data.pop(); clipped = true; }
+    }
   }
   const text = format === 'json' ? toJSON(cols, data) : toCSV(cols, data);
   return { text, rows: data.length, clipped };
 }
 
-const HANDLERS = { open, rows, count, query, page, cell, export: exportText };
+const HANDLERS = { open, rows, count, query, page, cell, export: exportText, header: setHeader };

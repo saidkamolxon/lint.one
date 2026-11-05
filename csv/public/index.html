@@ -483,7 +483,8 @@ function openBig(file) {
   currentModel = null;
   sortCol = null; sortDir = 1;
   big = { file: file, worker: null, calls: {}, nextId: 0, info: null, offset: 0, order: null,
-          filter: document.getElementById('search').value.trim(), total: null, seq: 0, page: null };
+          filter: document.getElementById('search').value.trim(), total: null, seq: 0, page: null,
+          cache: new Map(), gen: 0 };
   document.body.classList.add('big-file');
   LintApp.setDocument(file.name, function () { closeBig(); });
   document.getElementById('bigPager').hidden = false;
@@ -515,16 +516,44 @@ function openBig(file) {
   bigLoadFile();
 }
 
-/* (re)read the file into DuckDB's table, with the header setting as it is */
+/* whether the first line names the columns: a new view of the same table */
+function bigHeader(on) {
+  var b = big;
+  if (!b.info) return;
+  b.offset = 0; b.order = null;
+  b.gen++;
+  b.cache.clear();
+  document.getElementById('tree').classList.add('stale');
+  bigRpc('header', { on: on }).then(function (d) {
+    if (big !== b) return;
+    b.info.rows = d.rows;
+    b.info.columns = d.columns;
+    b.info.header = d.header;
+    b.total = b.filter ? null : d.rows;
+    bigStatusLine();
+    bigPage();
+  }, function (err) {
+    if (big !== b) return;
+    bigNote('err', 'That did not work', err.message, false);
+  });
+}
+
+/* read the file into DuckDB's table */
 function bigLoadFile() {
   var b = big;
   b.info = null; b.total = null; b.offset = 0; b.order = null; sortCol = null;
   bigReadingNote();
   var t0 = performance.now();
-  bigRpc('open', { file: b.file, format: 'csv', header: hasHeader }).then(function (info) {
+  bigRpc('open', { file: b.file, format: 'csv' }).then(function (info) {
     if (big !== b) return;
     b.info = info;
     b.total = info.rows;
+    /* DuckDB decides whether the first line is a header; the switch shows
+       what it found, and changes it without reading the file again */
+    var chk = document.getElementById('chkHeader');
+    chk.checked = !!info.header;
+    chk.disabled = !info.canToggle;
+    if (!info.canToggle) chk.parentNode.title = 'This file is read straight from disk, as DuckDB found it';
     b.secs = (performance.now() - t0) / 1000;
     bigStatusLine();
     bigPage();
@@ -563,25 +592,57 @@ function bigFilter() {
 }
 
 /* One page of rows. A newer request makes an older answer irrelevant; the
-   count of a filter comes after its first page, as in the Parquet tool. */
+   count of a filter comes after its first page, as in the Parquet tool.
+
+   Pages are kept, and the next one is fetched while this one is read: on
+   millions of rows a sorted page takes DuckDB a third of a second to
+   gather, which the person never waits for when it is already here. */
+var BIG_KEEP = 8;
+
+function bigKey(b, offset) {
+  return offset + '|' + JSON.stringify(b.order) + '|' + b.filter + '|' + b.gen;
+}
+
+function bigFetch(b, offset) {
+  var key = bigKey(b, offset);
+  if (b.cache.has(key)) return b.cache.get(key);
+  var p = bigRpc('rows', { offset: offset, limit: BIG_PAGE, order: b.order, filter: b.filter });
+  b.cache.set(key, p);
+  /* a failed fetch is not kept, so asking again tries again */
+  p.catch(function () { if (b.cache.get(key) === p) b.cache.delete(key); });
+  while (b.cache.size > BIG_KEEP) b.cache.delete(b.cache.keys().next().value);
+  return p;
+}
+
+function bigPrefetch(b) {
+  var next = b.offset + BIG_PAGE;
+  if (big !== b || !b.page || b.page.rows.length < BIG_PAGE) return;
+  if (b.total !== null && b.total !== undefined && next >= b.total) return;
+  bigFetch(b, next).catch(function () {});
+}
+
 function bigPage() {
   var b = big;
   if (!b || !b.info) return;
   var seq = ++b.seq;
-  var want = { offset: b.offset, limit: BIG_PAGE, order: b.order, filter: b.filter };
-  document.getElementById('tree').classList.add('stale');
-  bigRpc('rows', want).then(function (d) {
+  var want = { offset: b.offset, filter: b.filter };
+  var key = bigKey(b, b.offset);
+  var ready = b.cache.has(key);
+  if (!ready) document.getElementById('tree').classList.add('stale');
+  bigFetch(b, b.offset).then(function (d) {
     if (big !== b || seq !== b.seq) return;
     if (d.total !== null && d.total !== undefined) b.total = d.total;
     b.page = d;
     bigRender();
-    if (want.filter && (d.total === null || d.total === undefined)) {
+    if (want.filter && (b.total === null || b.total === undefined)) {
       return bigRpc('count', { filter: want.filter }).then(function (c) {
         if (big !== b || seq !== b.seq) return;
         b.total = c.n;
         bigPager();
+        bigPrefetch(b);
       });
     }
+    bigPrefetch(b);
   }).catch(function (err) {
     if (big !== b || seq !== b.seq) return;
     bigNote('err', 'That did not work', err.message, false);
@@ -686,6 +747,10 @@ function closeBig(quiet) {
   document.body.classList.remove('big-file');
   document.getElementById('bigPager').hidden = true;
   document.getElementById('matchCount').textContent = '';
+  var chk = document.getElementById('chkHeader');
+  chk.checked = hasHeader;
+  chk.disabled = false;
+  chk.parentNode.title = 'Treat the first row as column names';
   if (quiet) return;
   LintApp.setDocument(null);
   document.getElementById('search').value = '';
@@ -858,10 +923,11 @@ LintApp.when('btnDownload', function () { return !big; });
 var chkHeader = document.getElementById('chkHeader');
 chkHeader.checked = hasHeader;
 chkHeader.addEventListener('change', function () {
+  /* a large file's header is a fact about that file, not a setting to keep */
+  if (big) { bigHeader(chkHeader.checked); return; }
   hasHeader = chkHeader.checked;
   try { localStorage.setItem('lintuz-csv-header', hasHeader ? '1' : '0'); } catch (e) {}
   sortCol = null;
-  if (big) { bigLoadFile(); return; }
   app.editor.paint();
   app.run();
 });
