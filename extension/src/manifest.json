@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "lint.one",
   "short_name": "lint",
-  "version": "0.4.0",
-  "description": "Open JSON, YAML, CSV, XML, logs, HAR, .env, certificates, PDF, SQLite and Parquet from any page. Nothing leaves your browser.",
+  "version": "0.4.1",
+  "description": "Read the data you find on the web in a private viewer. Raw JSON is formatted where it opens. Nothing is uploaded.",
   "homepage_url": "https://lint.one/",
   "minimum_chrome_version": "116",
   "icons": {

@@ -85,32 +85,36 @@ lint.one in Search Console.
 **Name:** lint.one
 
 **Summary** (132 characters max; the manifest's `description`):
-Open JSON, YAML, CSV, XML, logs, HAR, .env, certificates, PDF, SQLite and Parquet from any page. Nothing leaves your browser.
+Read the data you find on the web in a private viewer. Raw JSON is formatted where it opens. Nothing is uploaded.
 
 **Description:**
 
-> Right-click a selection, a link or a raw data page and open it in the
-> lint.one viewer that reads it: a JSON tree with errors pinned to the line,
-> YAML validation, a sortable CSV table, XML with XPath, a log reader for
-> millions of lines, a HAR viewer that saves a copy without secrets, a .env
-> checker that says which lines break your app, an SSL certificate decoder,
-> PDFs, SQLite databases, Parquet files with SQL, and audio with a live
-> spectrum.
+> lint.one opens the data you come across while browsing, such as an API
+> response, a file behind a link or text you just copied, in a viewer made
+> for it.
 >
-> - Raw JSON, formatted where it opens: API responses become a tree you
->   can fold, with a preview of every branch and the path to any value
-> - Copy, then click: the popup offers what you just copied
-> - Right-click → Open in lint.one, on a selection, a link or a file page
-> - Alt+Shift+O opens the selection, or the page you are on
-> - The address bar: type "lint", a space, and paste
-> - The toolbar icon lights up in the format's colour on a file it reads
-> - Recently opened files, kept in memory until Chrome closes
-> - Listen to this tab: a live spectrum of any tab's sound, one click
+> Raw JSON pages become a tree you can fold, with a preview of every branch
+> and the path to any value one click away. Other files open in the
+> matching lint.one tool, where you can search, filter, convert and check
+> them.
 >
-> Private by design: lint.one runs entirely in your browser. The extension
-> passes files from the page to the lint.one tab inside the browser — never
-> in a URL, never through a server. No analytics, no accounts, no remote
-> code.
+> Ways to open something:
+> - Right-click a link, a selection or a file page and choose Open in lint.one
+> - Click the toolbar button: it offers the page you are on and what you just copied
+> - Select text and press Alt+Shift+O
+> - In the address bar, type "lint", a space, and paste
+>
+> The toolbar icon takes on a colour when the page you are on is a file
+> lint.one can open, and the files you opened recently stay in the popup
+> until Chrome closes.
+>
+> Private by design: lint.one runs entirely in your browser. Files go from
+> the page to the lint.one tab inside the browser, never in a URL and never
+> through a server. No analytics, no accounts, no remote code.
+
+The store rejected 0.4.0 for keyword spam ("Yellow Argon") because the
+summary was a list of formats. Keep the summary and the description in
+sentences, and name formats sparingly.
 
 **Category:** Developer Tools
 

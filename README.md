@@ -8,7 +8,7 @@
 | :-- | :-- | :-- |
 | `{}` | **[json.lint.one](https://json.lint.one)** | Collapsible tree, path copying, minify, unescape, errors pinned to the line; JSON Lines (`.jsonl`, `.ndjson`) as records, to an array or CSV. JSON Lines that read as a log (a level, or a time and a message) open in LOG instead, and so does data over 20 MB |
 | `—` | **[yaml.lint.one](https://yaml.lint.one)** | Indentation validation, multi-document manifests, YAML ↔ JSON |
-| `⌸` | **[csv.lint.one](https://csv.lint.one)** | Sortable table, delimiter sniffing, ragged-row flagging, CSV → JSON |
+| `⌸` | **[csv.lint.one](https://csv.lint.one)** | Sortable table, delimiter sniffing, ragged-row flagging, CSV → JSON. Files over 20 MB open as a table read by DuckDB: millions of rows, sorted and filtered in about a second |
 | `⚿` | **[lint.one/env](https://lint.one/env)** | How Node, Python, Compose, `docker run` and the shell each read a `.env` file; trailing spaces, duplicates, bad ports and URLs; diff against `.env.example`; export to Compose or Kubernetes |
 | `≡` | **[log.lint.one](https://log.lint.one)** | Severity filtering, folded stack traces, density strip; handles 1M+ lines |
 | `⋯` | **[lint.one/har](https://lint.one/har)** | The requests in a browser's HAR export: what failed, was slow, large or repeated at a glance; search through headers and bodies, `status:5xx time:>1s` filters; grouped by endpoint (`/users/{id}`) or domain; headers, bodies, timing; copy as cURL, fetch, Python, C#, PowerShell or raw HTTP; finds cookies, tokens and passwords and saves a copy without them |
@@ -209,6 +209,26 @@ for the same reason. A database saved in WAL mode opens without whatever its
   `4306` finds 4306.84 and `2025-09` finds that month. `column:text` looks
   in one column only (`city:khiva`, `address.city:khiva`). The page appears
   as soon as its rows are found; the count follows.
+
+**A CSV over 20 MB is not edited; DuckDB reads it.**
+- **Why.** Parsed into the editor and the table, a CSV costs the tab ten to
+  twelve times its size: 700 MB for a 60 MB file, and a crashed tab well
+  before a gigabyte. The editor used to refuse anything over 50 MB.
+- **How.** Past 20 MB the CSV tool hands the file to the Parquet tool's
+  DuckDB worker (`parquet/sql.js`, `open` with `format: 'csv'`). It reads
+  the file once into a table in its own memory, finding the delimiter, the
+  header and each column's type, and the page asks it for 200 rows at a
+  time. Sorting and filtering are queries; the tab itself stays at about
+  10 MB.
+- **Measured** in Chromium: 60 MB (858,000 rows) opens in 2.5 s; 440 MB
+  (6 million rows) in 8 s, sorts in a third of a second and filters in two.
+- **When it does not fit.** A value further down that does not fit the
+  type DuckDB guessed makes it read every column as text. A table too
+  large for DuckDB's 1 GB is read straight from the file instead, about a
+  second a page.
+- **What it cannot do.** The file is not editable in this mode. Convert to
+  JSON and Export → Download these rows take the rows as the table shows
+  them, up to 100,000.
 
 **.env has no specification**, so the tool reads a file the way five
 programs do and shows where they part:
